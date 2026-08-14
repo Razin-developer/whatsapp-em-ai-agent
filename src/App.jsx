@@ -13,7 +13,14 @@ export default function App() {
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
   const [groups, setGroups] = useState([]);
-  const [selectedGroupIds, setSelectedGroupIds] = useState(['ALL']);
+  const [selectedGroupIds, setSelectedGroupIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem('EM_SELECTED_GROUPS');
+      return saved ? JSON.parse(saved) : ['ALL'];
+    } catch (e) {
+      return ['ALL'];
+    }
+  });
   const [loadingGroups, setLoadingGroups] = useState(false);
   const [logs, setLogs] = useState([]);
   const [showQR, setShowQR] = useState(false);
@@ -61,7 +68,10 @@ export default function App() {
       if (data.usage) setUsageData(data.usage);
       if (data.status?.logs) setLogs(data.status.logs);
       if (data.groups) setGroups(data.groups);
-      if (data.selectedGroupIds) setSelectedGroupIds(data.selectedGroupIds);
+      const serverSelected = data.selectedGroups ?? data.selectedGroupIds;
+      if (Array.isArray(serverSelected) && !localStorage.getItem('EM_SELECTED_GROUPS')) {
+        setSelectedGroupIds(serverSelected);
+      }
       if (data.status?.status === 'QR_READY') setShowQR(true);
       if (data.status?.status === 'CONNECTED') {
         setShowQR(false);
@@ -79,7 +89,11 @@ export default function App() {
       setGroups(data.groups || []);
       setLoadingGroups(false);
     } else if (event === 'SELECTED_GROUPS_UPDATED') {
-      setSelectedGroupIds(data.selectedGroupIds || ['ALL']);
+      const serverSelected = data.selectedGroups ?? data.selectedGroupIds;
+      if (Array.isArray(serverSelected)) {
+        setSelectedGroupIds(serverSelected);
+        try { localStorage.setItem('EM_SELECTED_GROUPS', JSON.stringify(serverSelected)); } catch (e) {}
+      }
     } else if (event === 'USAGE_UPDATED') {
       setUsageData(data);
     } else if (event === 'LOG_ADDED') {
@@ -91,6 +105,14 @@ export default function App() {
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({ action, payload }));
     }
+  };
+
+  const updateSelectedGroups = (next) => {
+    setSelectedGroupIds(next);
+    try {
+      localStorage.setItem('EM_SELECTED_GROUPS', JSON.stringify(next));
+    } catch (e) {}
+    sendWSAction('SET_SELECTED_GROUPS', { groups: next, selectedGroups: next, selectedGroupIds: next });
   };
 
   const handleConnect = () => {
@@ -128,20 +150,15 @@ export default function App() {
         next = ['ALL'];
       }
     }
-    setSelectedGroupIds(next);
-    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
+    updateSelectedGroups(next);
   };
 
   const handleSelectAllGroups = () => {
-    const next = ['ALL'];
-    setSelectedGroupIds(next);
-    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
+    updateSelectedGroups(['ALL']);
   };
 
   const handleDeselectAllGroups = () => {
-    const next = [];
-    setSelectedGroupIds(next);
-    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
+    updateSelectedGroups([]);
   };
 
   return (

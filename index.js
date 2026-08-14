@@ -2088,6 +2088,9 @@ wss.on(
                 selectedGroups:
                     settings.selectedGroups,
 
+                selectedGroupIds:
+                    settings.selectedGroups,
+
                 logs:
                     logs.slice(
                         0,
@@ -2220,6 +2223,8 @@ wss.on(
                             "SELECTED_GROUPS_UPDATED",
                             {
                                 selectedGroups:
+                                    settings.selectedGroups,
+                                selectedGroupIds:
                                     settings.selectedGroups
                             }
                         );
