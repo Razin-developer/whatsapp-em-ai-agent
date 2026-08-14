@@ -1,7 +1,7 @@
 import React from 'react';
-import { Users, Phone, ShieldAlert, CheckCircle2, Clock } from 'lucide-react';
+import { Users, Phone, ShieldAlert, CheckCircle2, Clock, RotateCcw } from 'lucide-react';
 
-export default function UsageTable({ usageData }) {
+export default function UsageTable({ usageData, onResetUserLimit }) {
   const { users = [], maxDailyLimit = 5, totalUsers = 0, activeToday = 0 } = usageData || {};
 
   return (
@@ -39,12 +39,13 @@ export default function UsageTable({ usageData }) {
               <th className="py-3 px-4">Quota Remaining</th>
               <th className="py-3 px-4">Access Status</th>
               <th className="py-3 px-4 text-right">Last Interaction</th>
+              <th className="py-3 px-4 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/60 font-medium">
             {users.length === 0 ? (
               <tr>
-                <td colSpan="5" className="py-8 text-center text-gray-500">
+                <td colSpan="6" className="py-8 text-center text-gray-500">
                   No interactions recorded today yet. Mention <b>@AI</b> on WhatsApp to trigger!
                 </td>
               </tr>
@@ -117,6 +118,18 @@ export default function UsageTable({ usageData }) {
                         <Clock className="w-3 h-3 text-gray-500" />
                         {u.lastTimestamp ? new Date(u.lastTimestamp).toLocaleTimeString() : 'N/A'}
                       </div>
+                    </td>
+
+                    {/* Action: Individual Reset Button */}
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        onClick={() => onResetUserLimit && onResetUserLimit(u.number)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-emerald-500/20 text-gray-300 hover:text-emerald-300 border border-gray-700 hover:border-emerald-500/30 text-[11px] font-semibold transition"
+                        title={`Reset limit for +${u.number}`}
+                      >
+                        <RotateCcw className="w-3 h-3 text-emerald-400" />
+                        Reset
+                      </button>
                     </td>
 
                   </tr>

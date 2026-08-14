@@ -161,6 +161,10 @@ export default function App() {
     updateSelectedGroups([]);
   };
 
+  const handleResetUserLimit = (phoneNumber) => {
+    sendWSAction('RESET_USER_LIMIT', { phoneNumber });
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0b0f19]">
       
@@ -252,7 +256,7 @@ export default function App() {
             {/* Top Grid: Usage Table & Anti-Ban Config */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
-                <UsageTable usageData={usageData} />
+                <UsageTable usageData={usageData} onResetUserLimit={handleResetUserLimit} />
               </div>
               <div>
                 <AntiBanPanel settings={statusInfo} onSaveSettings={handleSaveSettings} />

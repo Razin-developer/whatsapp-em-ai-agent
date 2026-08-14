@@ -129,6 +129,17 @@ class RateLimiter {
         return data.records[cleanNumber];
     }
 
+    resetUserAccess(phoneNumber) {
+        const cleanNumber = this.cleanPhoneNumber(phoneNumber);
+        const data = this.loadData();
+        if (data.records[cleanNumber]) {
+            data.records[cleanNumber].count = 0;
+            data.records[cleanNumber].lastTimestamp = new Date().toISOString();
+            this.saveData(data);
+        }
+        return this.getUsageStats();
+    }
+
     getUsageStats() {
         const data = this.loadData();
         const today = this.getTodayKey();
@@ -2315,6 +2326,9 @@ wss.on(
                 selectedGroupIds:
                     settings.selectedGroups,
 
+                usage:
+                    rateLimiter.getUsageStats(),
+
                 logs:
                     logs.slice(
                         0,
@@ -2451,6 +2465,41 @@ wss.on(
                                 selectedGroupIds:
                                     settings.selectedGroups
                             }
+                        );
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       RESET USER LIMIT
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "RESET_USER_LIMIT"
+                    ) {
+                        const phoneNumber =
+                            payload.phoneNumber;
+
+                        if (!phoneNumber) {
+                            throw new Error(
+                                "phoneNumber is required"
+                            );
+                        }
+
+                        const stats =
+                            rateLimiter.resetUserAccess(
+                                phoneNumber
+                            );
+
+                        broadcast(
+                            "USAGE_UPDATED",
+                            stats
+                        );
+
+                        log(
+                            "INFO",
+                            `Reset daily limit for ${phoneNumber}`
                         );
 
                         return;
