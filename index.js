@@ -1308,13 +1308,36 @@ async function handleMessage(msg) {
 }
 
 /* ============================================================
-   AI (HACKAI SDK EXCLUSIVE)
+   AI (HACKAI SDK EXCLUSIVE WITH DETAILED DEBUGGING)
 ============================================================ */
+
+function extractTextFromResponse(res) {
+    if (!res) return "";
+    if (typeof res === "string") return res;
+    if (res.text && typeof res.text === "string") return res.text;
+    if (res.content && typeof res.content === "string") return res.content;
+    if (res.message && typeof res.message === "string") return res.message;
+    if (res.output && typeof res.output === "string") return res.output;
+    if (res.response && typeof res.response === "string") return res.response;
+    if (res.result && typeof res.result === "string") return res.result;
+    if (res.choices?.[0]?.message?.content) return res.choices[0].message.content;
+    if (res.choices?.[0]?.text) return res.choices[0].text;
+    if (res.data && typeof res.data === "string") return res.data;
+    return "";
+}
 
 async function generateAIResponse(prompt, senderName = "Friend") {
     const apiKey = process.env.HACKAI_API_KEY || "";
 
+    log("INFO", "[AI CALL] Initiating generateAIResponse", {
+        hasApiKey: Boolean(apiKey),
+        senderName,
+        promptLength: prompt?.length || 0,
+        hackAiSdkLoaded: Boolean(hackAiSdk)
+    });
+
     if (!apiKey) {
+        log("WARN", "[AI CALL] Aborted: HACKAI_API_KEY is missing");
         return "⚠️ HackAI API Key is missing. Please set HACKAI_API_KEY in your .env file.";
     }
 
@@ -1325,32 +1348,159 @@ async function generateAIResponse(prompt, senderName = "Friend") {
         let aiText = "";
 
         if (hackAiSdk) {
+            log("INFO", "[AI CALL] Inspecting HackAI SDK exports", {
+                keys: Object.keys(hackAiSdk),
+                hasDefault: Boolean(hackAiSdk.default),
+                hasClient: Boolean(hackAiSdk.Client),
+                hasHackAI: Boolean(hackAiSdk.HackAI)
+            });
+
             const SDKClient = hackAiSdk.Client || hackAiSdk.default || hackAiSdk.HackAI;
+            
             if (typeof SDKClient === "function") {
-                const clientInstance = new SDKClient({ apiKey });
-                if (typeof clientInstance.chat === "function") {
-                    const res = await clientInstance.chat({ system: systemInstruction, prompt: cleanPrompt });
-                    aiText = res?.text || res?.content || res?.message || "";
-                } else if (typeof clientInstance.generateText === "function") {
-                    const res = await clientInstance.generateText({ system: systemInstruction, prompt: cleanPrompt });
-                    aiText = res?.text || res?.content || res?.message || "";
+                let clientInstance = null;
+                try {
+                    clientInstance = new SDKClient({ apiKey });
+                } catch (instErr) {
+                    try {
+                        clientInstance = SDKClient({ apiKey });
+                    } catch (fErr) {
+                        log("WARN", "[AI CALL] SDKClient initialization failed", { error: fErr.message });
+                    }
                 }
-            } else if (typeof hackAiSdk.generateText === "function") {
-                const res = await hackAiSdk.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
-                aiText = res?.text || res?.content || res?.message || "";
-            } else if (typeof hackAiSdk.chat === "function") {
-                const res = await hackAiSdk.chat({ apiKey, system: systemInstruction, prompt: cleanPrompt });
-                aiText = res?.text || res?.content || res?.message || "";
+
+                if (clientInstance) {
+                    const methodNames = Object.keys(clientInstance).concat(
+                        Object.getOwnPropertyNames(Object.getPrototypeOf(clientInstance) || {})
+                    );
+
+                    log("INFO", "[AI CALL] Client instance methods", { methods: methodNames });
+
+                    // Try method 1: clientInstance.chat()
+                    if (typeof clientInstance.chat === "function") {
+                        try {
+                            log("INFO", "[AI CALL] Calling clientInstance.chat()...");
+                            const res = await clientInstance.chat({
+                                apiKey,
+                                system: systemInstruction,
+                                prompt: cleanPrompt,
+                                messages: [
+                                    { role: "system", content: systemInstruction },
+                                    { role: "user", content: cleanPrompt }
+                                ]
+                            });
+                            log("INFO", "[AI CALL] clientInstance.chat() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                            aiText = extractTextFromResponse(res);
+                        } catch (err1) {
+                            log("WARN", "[AI CALL] clientInstance.chat() failed", { error: err1.message });
+                        }
+                    }
+
+                    // Try method 2: clientInstance.generateText()
+                    if (!aiText && typeof clientInstance.generateText === "function") {
+                        try {
+                            log("INFO", "[AI CALL] Calling clientInstance.generateText()...");
+                            const res = await clientInstance.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                            log("INFO", "[AI CALL] clientInstance.generateText() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                            aiText = extractTextFromResponse(res);
+                        } catch (err2) {
+                            log("WARN", "[AI CALL] clientInstance.generateText() failed", { error: err2.message });
+                        }
+                    }
+
+                    // Try method 3: clientInstance.chat.completions.create()
+                    if (!aiText && clientInstance.chat?.completions?.create) {
+                        try {
+                            log("INFO", "[AI CALL] Calling clientInstance.chat.completions.create()...");
+                            const res = await clientInstance.chat.completions.create({
+                                messages: [
+                                    { role: "system", content: systemInstruction },
+                                    { role: "user", content: cleanPrompt }
+                                ]
+                            });
+                            log("INFO", "[AI CALL] completions.create() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                            aiText = extractTextFromResponse(res);
+                        } catch (err3) {
+                            log("WARN", "[AI CALL] completions.create() failed", { error: err3.message });
+                        }
+                    }
+                }
+            }
+
+            // Direct SDK functions: hackAiSdk.generateText / hackAiSdk.chat
+            if (!aiText && typeof hackAiSdk.generateText === "function") {
+                try {
+                    log("INFO", "[AI CALL] Calling hackAiSdk.generateText()...");
+                    const res = await hackAiSdk.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                    log("INFO", "[AI CALL] hackAiSdk.generateText() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                    aiText = extractTextFromResponse(res);
+                } catch (err4) {
+                    log("WARN", "[AI CALL] hackAiSdk.generateText() failed", { error: err4.message });
+                }
+            }
+
+            if (!aiText && typeof hackAiSdk.chat === "function") {
+                try {
+                    log("INFO", "[AI CALL] Calling hackAiSdk.chat()...");
+                    const res = await hackAiSdk.chat({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                    log("INFO", "[AI CALL] hackAiSdk.chat() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                    aiText = extractTextFromResponse(res);
+                } catch (err5) {
+                    log("WARN", "[AI CALL] hackAiSdk.chat() failed", { error: err5.message });
+                }
+            }
+        }
+
+        // Direct HTTP fallback if SDK returned empty
+        if (!aiText) {
+            log("INFO", "[AI CALL] Attempting HTTP fallback API call...");
+            const endpoints = [
+                "https://api.hackai.io/v1/chat/completions",
+                "https://api.hackai.dev/v1/chat/completions"
+            ];
+
+            for (const endpoint of endpoints) {
+                try {
+                    log("INFO", `[AI CALL] Trying HTTP endpoint: ${endpoint}`);
+                    const httpRes = await fetch(endpoint, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": `Bearer ${apiKey}`
+                        },
+                        body: JSON.stringify({
+                            model: "hackai-v1",
+                            messages: [
+                                { role: "system", content: systemInstruction },
+                                { role: "user", content: cleanPrompt }
+                            ]
+                        })
+                    });
+
+                    log("INFO", `[AI CALL] HTTP status from ${endpoint}: ${httpRes.status}`);
+                    if (httpRes.ok) {
+                        const data = await httpRes.json();
+                        log("INFO", `[AI CALL] HTTP JSON response`, { data: JSON.stringify(data)?.slice(0, 300) });
+                        aiText = extractTextFromResponse(data);
+                        if (aiText) break;
+                    }
+                } catch (fetchErr) {
+                    log("WARN", `[AI CALL] HTTP endpoint ${endpoint} failed: ${fetchErr.message}`);
+                }
             }
         }
 
         if (aiText && typeof aiText === "string") {
+            log("INFO", `[AI CALL] ✅ Successfully generated AI response (${aiText.length} chars)`, {
+                preview: aiText.slice(0, 100)
+            });
             return aiText.trim();
         }
 
+        log("ERROR", "[AI CALL] ❌ All AI generation methods returned empty response");
         throw new Error("HackAI SDK returned empty response");
     } catch (error) {
-        log("ERROR", "HackAI Generation Error", { error: error.message });
+        log("ERROR", "[AI CALL] HackAI Generation Exception", { error: error.message, stack: error.stack });
         return `⚠️ HackAI Generation Failed: ${error.message || "Unknown error"}`;
     }
 }
