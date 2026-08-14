@@ -258,21 +258,29 @@ function addLog(type, message, details = {}) {
   broadcastWS('LOG_ADDED', logItem);
 }
 
-async function fetchRealGroups() {
+async function fetchRealGroups(maxRetries = 5, delayMs = 1500) {
   if (!client || agentStatus !== 'CONNECTED') return [];
-  try {
-    const chats = await client.getChats();
-    return chats
-      .filter(c => c.isGroup)
-      .map(c => ({
-        id: c.id._serialized,
-        name: c.name || 'Unnamed Group',
-        unreadCount: c.unreadCount || 0,
-        participantCount: c.participants ? c.participants.length : 0
-      }));
-  } catch (e) {
-    return [];
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const chats = await client.getChats();
+      const groups = chats.filter(c => c && (c.isGroup || c.id?._serialized?.endsWith('@g.us')));
+      
+      if (groups.length > 0 || attempt === maxRetries) {
+        addLog('INFO', `Discovered ${groups.length} WhatsApp Group(s) from WhatsApp Web.`);
+        return groups.map(c => ({
+          id: c.id._serialized,
+          name: c.name || 'Unnamed Group',
+          unreadCount: c.unreadCount || 0,
+          participantCount: Array.isArray(c.participants) ? c.participants.length : 0
+        }));
+      }
+    } catch (e) {
+      addLog('ERROR', `Error fetching chats (Attempt ${attempt}/${maxRetries}): ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, delayMs));
   }
+  return [];
 }
 
 async function initWhatsApp() {
@@ -316,14 +324,23 @@ async function initWhatsApp() {
     addLog('INFO', 'WhatsApp Web authenticated successfully!');
   });
 
+  client.on('auth_failure', (err) => {
+    agentStatus = 'ERROR';
+    broadcastWS('STATUS_CHANGED', { status: agentStatus, error: err?.message || 'Authentication Failed' });
+    addLog('ERROR', `WhatsApp Auth Failure: ${err?.message || 'Failed'}`);
+  });
+
   client.on('ready', async () => {
     agentStatus = 'CONNECTED';
     userPhone = client.info?.wid?.user || 'Connected User';
     broadcastWS('STATUS_CHANGED', { status: agentStatus, phone: userPhone });
     addLog('INFO', `🤖 WhatsApp AI Agent is LIVE & READY for user: +${userPhone}`);
 
-    const groups = await fetchRealGroups();
-    broadcastWS('GROUPS_LIST', { groups });
+    // Allow 2 seconds for WhatsApp Web to sync groups after ready event
+    setTimeout(async () => {
+      const groups = await fetchRealGroups();
+      broadcastWS('GROUPS_LIST', { groups });
+    }, 2000);
   });
 
   client.on('disconnected', (reason) => {
