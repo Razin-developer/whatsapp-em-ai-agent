@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "vite build && node server/index.js",
-    "dev": "vite build && node server/index.js",
+    "start": "vite build && node index.js",
+    "dev": "vite build && node index.js",
     "build": "vite build",
-    "server": "node server/index.js"
+    "server": "node index.js"
   },
   "dependencies": {
     "@razinmohammedpt/hackai-sdk": "^1.0.0",

@@ -1,16 +1,8 @@
-import React, { useState } from 'react';
-import { Bot, QrCode, LogOut, ShieldCheck, Zap, Radio, Server, CheckCircle } from 'lucide-react';
+import React from 'react';
+import { Bot, QrCode, LogOut, ShieldCheck, Zap, Radio, Wifi, WifiOff } from 'lucide-react';
 
-export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR, runnerUrl, onSaveRunnerUrl, wsConnected }) {
+export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR, wsConnected }) {
   const { status = 'DISCONNECTED', userPhone = '', qrCodeUrl = '' } = statusInfo || {};
-  const [editingUrl, setEditingUrl] = useState(false);
-  const [tempUrl, setTempUrl] = useState(runnerUrl || 'http://localhost:3001');
-
-  const handleUrlSubmit = (e) => {
-    e.preventDefault();
-    onSaveRunnerUrl(tempUrl);
-    setEditingUrl(false);
-  };
 
   const getStatusBadge = () => {
     switch (status) {
@@ -67,31 +59,19 @@ export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR, 
                 Anti-Ban System • 5/Day Limit
               </span>
 
-              {/* Runner Endpoint Selector */}
-              {editingUrl ? (
-                <form onSubmit={handleUrlSubmit} className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    value={tempUrl}
-                    onChange={(e) => setTempUrl(e.target.value)}
-                    className="bg-gray-900 border border-emerald-500/50 rounded px-2 py-0.5 text-[11px] text-white font-mono"
-                    placeholder="http://localhost:3001"
-                  />
-                  <button type="submit" className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold">Save</button>
-                </form>
-              ) : (
-                <button
-                  onClick={() => setEditingUrl(true)}
-                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-gray-900 border border-gray-800 hover:border-gray-700 text-[11px] text-gray-300 font-mono"
-                  title="Click to edit Agent Runner Server URL"
-                >
-                  <Server className="w-3 h-3 text-blue-400" />
-                  <span>Runner: <b>{runnerUrl}</b></span>
-                  <span className="text-[9px] px-1 rounded bg-gray-800 text-emerald-400 ml-1">
-                    {wsConnected ? 'WebSocket' : 'HTTP Polling'}
-                  </span>
-                </button>
-              )}
+              <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-gray-900 border border-gray-800 text-[11px] font-mono">
+                {wsConnected ? (
+                  <>
+                    <Wifi className="w-3 h-3 text-emerald-400" />
+                    <span className="text-emerald-400">WebSocket Live</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-3 h-3 text-rose-400" />
+                    <span className="text-rose-400">Connecting WS...</span>
+                  </>
+                )}
+              </span>
             </div>
           </div>
         </div>

@@ -6,92 +6,70 @@ import UsageTable from './components/UsageTable.jsx';
 import AntiBanPanel from './components/AntiBanPanel.jsx';
 import LogViewer from './components/LogViewer.jsx';
 import TestSimulatorModal from './components/TestSimulatorModal.jsx';
-import { Play, Sparkles, RefreshCw, Zap, Shield, LayoutDashboard, QrCode } from 'lucide-react';
+import { Play, RefreshCw, Zap, QrCode, LayoutDashboard } from 'lucide-react';
 
 export default function App() {
-  const [runnerUrl, setRunnerUrl] = useState('http://localhost:3001');
   const [activeTab, setActiveTab] = useState('SETUP'); // SETUP | DASHBOARD
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
   const [logs, setLogs] = useState([]);
   const [showQR, setShowQR] = useState(false);
   const [showSimulator, setShowSimulator] = useState(false);
+  const [ws, setWs] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
 
-  const saveRunnerUrl = (url) => {
-    const clean = url.replace(/\/$/, '');
-    setRunnerUrl(clean);
-    localStorage.setItem('EM_AGENT_RUNNER_URL', clean);
-  };
-
-  const fetchStatus = async () => {
-    try {
-      const statusRes = await fetch(`${runnerUrl}/api/status`);
-      const statusJson = await statusRes.json();
-      if (statusJson.success) {
-        setStatusInfo(statusJson.agent);
-        setUsageData(statusJson.usage);
-        if (statusJson.agent.logs) setLogs(statusJson.agent.logs);
-        if (statusJson.agent.status === 'QR_READY') setShowQR(true);
-        if (statusJson.agent.status === 'CONNECTED') setShowQR(false);
-      }
-    } catch (err) {
-      // Runner disconnected or unreachable
-    }
-  };
-
-  // Setup WebSocket connection with Automatic HTTP Polling Fallback for Vercel
+  // Single Pure WebSocket Connection
   useEffect(() => {
-    fetchStatus();
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsHost = window.location.host || 'localhost:3001';
+    const wsUrl = `${wsProtocol}//${wsHost}`;
 
-    // 1. HTTP Polling fallback timer (Every 2.5s for seamless Vercel updates)
-    const pollInterval = setInterval(() => {
-      fetchStatus();
-    }, 2500);
-
-    // 2. Try WebSocket for real-time streaming when supported
     let socket = null;
-    if (runnerUrl) {
-      try {
-        const wsProtocol = runnerUrl.startsWith('https') ? 'wss:' : 'ws:';
-        const cleanHost = runnerUrl.replace(/^https?:\/\//, '');
-        const wsUrl = `${wsProtocol}//${cleanHost}`;
+    try {
+      socket = new WebSocket(wsUrl);
 
-        socket = new WebSocket(wsUrl);
+      socket.onopen = () => {
+        setWsConnected(true);
+      };
 
-        socket.onopen = () => setWsConnected(true);
-        socket.onclose = () => setWsConnected(false);
-        socket.onerror = () => setWsConnected(false);
-
-        socket.onmessage = (event) => {
-          try {
-            const payload = JSON.parse(event.data);
-            handleWebSocketEvent(payload);
-          } catch (e) {}
-        };
-      } catch (e) {
+      socket.onclose = () => {
         setWsConnected(false);
-      }
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          handleWebSocketMessage(payload);
+        } catch (e) {}
+      };
+
+      setWs(socket);
+    } catch (e) {
+      setWsConnected(false);
     }
 
     return () => {
-      clearInterval(pollInterval);
       if (socket) socket.close();
     };
-  }, [runnerUrl]);
+  }, []);
 
-
-  const handleWebSocketEvent = (payload) => {
-    const { event, data } = payload;
+  const handleWebSocketMessage = ({ event, data }) => {
     if (event === 'INITIAL_STATE') {
       if (data.status) setStatusInfo(data.status);
       if (data.usage) setUsageData(data.usage);
       if (data.status?.logs) setLogs(data.status.logs);
       if (data.status?.status === 'QR_READY') setShowQR(true);
+      if (data.status?.status === 'CONNECTED') {
+        setShowQR(false);
+        setActiveTab('DASHBOARD');
+      }
     } else if (event === 'STATUS_CHANGED') {
       setStatusInfo((prev) => ({ ...prev, ...data }));
       if (data.status === 'QR_READY') setShowQR(true);
-      if (data.status === 'CONNECTED') setShowQR(false);
+      if (data.status === 'CONNECTED') {
+        setShowQR(false);
+        setActiveTab('DASHBOARD');
+      }
     } else if (event === 'QR_CODE') {
       setStatusInfo((prev) => ({ ...prev, qrCodeUrl: data.qr }));
       setShowQR(true);
@@ -102,53 +80,30 @@ export default function App() {
     }
   };
 
-  const handleConnect = async () => {
-    try {
-      setStatusInfo((prev) => ({ ...prev, status: 'INITIALIZING' }));
-      await fetch(`${runnerUrl}/api/connect`, { method: 'POST' });
-    } catch (err) {
-      console.error('Error connecting WhatsApp:', err);
+  const sendWSAction = (action, payload = {}) => {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ action, payload }));
     }
   };
 
-  const handleDisconnect = async () => {
-    try {
-      await fetch(`${runnerUrl}/api/disconnect`, { method: 'POST' });
-      setStatusInfo((prev) => ({ ...prev, status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '' }));
-      setShowQR(false);
-    } catch (err) {
-      console.error('Error disconnecting:', err);
-    }
+  const handleConnect = () => {
+    setStatusInfo((prev) => ({ ...prev, status: 'INITIALIZING' }));
+    sendWSAction('CONNECT');
   };
 
-  const handleSaveSettings = async (newSettings) => {
-    try {
-      const res = await fetch(`${runnerUrl}/api/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSettings)
-      });
-      const data = await res.json();
-      if (data.success) {
-        setStatusInfo((prev) => ({ ...prev, mode: newSettings.aiMode, antiBan: data.currentSettings.antiBan }));
-        setUsageData((prev) => ({ ...prev, maxDailyLimit: newSettings.maxDailyLimit }));
-      }
-    } catch (err) {
-      console.error('Error saving settings:', err);
-    }
+  const handleDisconnect = () => {
+    sendWSAction('DISCONNECT');
+    setStatusInfo((prev) => ({ ...prev, status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '' }));
+    setShowQR(false);
   };
 
-  const handleRunTestTrigger = async (testData) => {
-    try {
-      await fetch(`${runnerUrl}/api/test-trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(testData)
-      });
-      setShowSimulator(false);
-    } catch (err) {
-      console.error('Error running test trigger:', err);
-    }
+  const handleSaveSettings = (newSettings) => {
+    sendWSAction('UPDATE_SETTINGS', newSettings);
+  };
+
+  const handleRunTestTrigger = (testData) => {
+    sendWSAction('TEST_TRIGGER', testData);
+    setShowSimulator(false);
   };
 
   return (
@@ -160,8 +115,7 @@ export default function App() {
         onConnect={handleConnect}
         onDisconnect={handleDisconnect}
         onOpenQR={() => setShowQR(true)}
-        runnerUrl={runnerUrl}
-        onSaveRunnerUrl={saveRunnerUrl}
+        runnerUrl="ws://localhost:3001"
         wsConnected={wsConnected}
       />
 
@@ -196,7 +150,7 @@ export default function App() {
         </div>
 
         {activeTab === 'SETUP' ? (
-          /* SETUP WIZARD PAGE VIEW */
+          /* SETUP WIZARD VIEW */
           <SetupWizard
             statusInfo={statusInfo}
             onConnect={handleConnect}
@@ -206,7 +160,7 @@ export default function App() {
         ) : (
           /* DASHBOARD VIEW */
           <>
-            {/* Quick Activation Bar */}
+            {/* Quick Trigger Rule Bar */}
             <div className="glass-panel p-4 rounded-2xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/20 via-gray-900 to-gray-900 flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
@@ -217,7 +171,7 @@ export default function App() {
                     Trigger Activation Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@</code> + <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">EM</code>
                   </h2>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    The agent responds automatically in group or direct WhatsApp chats whenever anyone mentions both <code className="text-emerald-400">@</code> and <code className="text-emerald-400">EM</code> (e.g. <b>@EM</b>, <b>@bot EM</b>).
+                    Responds automatically whenever anyone mentions both <code className="text-emerald-400">@</code> and <code className="text-emerald-400">EM</code> in chats.
                   </p>
                 </div>
               </div>
@@ -229,14 +183,6 @@ export default function App() {
                 >
                   <Play className="w-3.5 h-3.5 text-emerald-400" />
                   Test Mention Simulator
-                </button>
-
-                <button
-                  onClick={fetchStatus}
-                  className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition"
-                  title="Refresh Dashboard"
-                >
-                  <RefreshCw className="w-4 h-4" />
                 </button>
               </div>
             </div>
@@ -262,7 +208,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-gray-800/80 py-4 text-center text-xs text-gray-500">
-        WhatsApp @EM AI Agent Powered by HackAI SDK & Playwright • 5 Responses/Day Rate Limiter • GitHub & Vercel Ready
+        WhatsApp @EM AI Agent Powered by Pure WebSockets & Headless Chrome • 5 Responses/Day Rate Limiter
       </footer>
 
       {/* QR Code Modal */}
