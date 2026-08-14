@@ -58,9 +58,9 @@ class WhatsAppAgent {
     this.broadcast('STATUS_CHANGED', { status: this.status });
     this.addLog('INFO', 'Initializing WhatsApp Web Client with Playwright engine...');
 
-    // Auto-detect system Chrome path on Windows if installed
-    let chromePath = undefined;
-    if (process.platform === 'win32') {
+    // Auto-detect system Chrome path for Windows or Docker environment
+    let chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+    if (!chromePath && process.platform === 'win32') {
       const standardPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
       const x86Path = 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
       if (fs.existsSync(standardPath)) chromePath = standardPath;
