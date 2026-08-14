@@ -1,19 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header.jsx';
+import SetupWizard from './components/SetupWizard.jsx';
 import QRModal from './components/QRModal.jsx';
 import UsageTable from './components/UsageTable.jsx';
 import AntiBanPanel from './components/AntiBanPanel.jsx';
 import LogViewer from './components/LogViewer.jsx';
 import TestSimulatorModal from './components/TestSimulatorModal.jsx';
-import { Play, Sparkles, RefreshCw, Zap, Shield, HelpCircle } from 'lucide-react';
+import { Play, Sparkles, RefreshCw, Zap, Shield, LayoutDashboard, QrCode } from 'lucide-react';
 
 export default function App() {
   const [runnerUrl, setRunnerUrl] = useState(() => {
     const saved = localStorage.getItem('EM_AGENT_RUNNER_URL');
     if (saved) return saved;
-    // Default to relative path (empty string) on Vercel to use Vercel Serverless API, or localhost when developing locally
     return window.location.port === '5173' ? 'http://localhost:3001' : '';
   });
+  const [activeTab, setActiveTab] = useState('SETUP'); // SETUP | DASHBOARD
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
   const [logs, setLogs] = useState([]);
@@ -168,58 +169,98 @@ export default function App() {
         wsConnected={wsConnected}
       />
 
-      {/* Main Content Area */}
+      {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         
-        {/* Quick Activation Bar */}
-        <div className="glass-panel p-4 rounded-2xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/20 via-gray-900 to-gray-900 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <Zap className="w-5 h-5" />
+        {/* Navigation Tabs */}
+        <div className="flex items-center gap-2 border-b border-gray-800 pb-3">
+          <button
+            onClick={() => setActiveTab('SETUP')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+              activeTab === 'SETUP'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
+                : 'bg-gray-900 border border-gray-800 text-gray-400 hover:text-white'
+            }`}
+          >
+            <QrCode className="w-4 h-4" />
+            WhatsApp Setup Wizard
+          </button>
+
+          <button
+            onClick={() => setActiveTab('DASHBOARD')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+              activeTab === 'DASHBOARD'
+                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
+                : 'bg-gray-900 border border-gray-800 text-gray-400 hover:text-white'
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            Live Agent Dashboard
+          </button>
+        </div>
+
+        {activeTab === 'SETUP' ? (
+          /* SETUP WIZARD PAGE VIEW */
+          <SetupWizard
+            statusInfo={statusInfo}
+            onConnect={handleConnect}
+            onDisconnect={handleDisconnect}
+            onGoToDashboard={() => setActiveTab('DASHBOARD')}
+          />
+        ) : (
+          /* DASHBOARD VIEW */
+          <>
+            {/* Quick Activation Bar */}
+            <div className="glass-panel p-4 rounded-2xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/20 via-gray-900 to-gray-900 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <Zap className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                    Trigger Activation Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@</code> + <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">EM</code>
+                  </h2>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    The agent responds automatically in group or direct WhatsApp chats whenever anyone mentions both <code className="text-emerald-400">@</code> and <code className="text-emerald-400">EM</code> (e.g. <b>@EM</b>, <b>@bot EM</b>).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowSimulator(true)}
+                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold border border-gray-700 transition"
+                >
+                  <Play className="w-3.5 h-3.5 text-emerald-400" />
+                  Test Mention Simulator
+                </button>
+
+                <button
+                  onClick={fetchStatus}
+                  className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition"
+                  title="Refresh Dashboard"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
             </div>
+
+            {/* Top Grid: Usage Table & Anti-Ban Config */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <UsageTable usageData={usageData} />
+              </div>
+              <div>
+                <AntiBanPanel settings={statusInfo} onSaveSettings={handleSaveSettings} />
+              </div>
+            </div>
+
+            {/* Bottom Stream: Live Activity Log Viewer */}
             <div>
-              <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                Trigger Activation Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@</code> + <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">EM</code>
-              </h2>
-              <p className="text-xs text-gray-400 mt-0.5">
-                The agent responds automatically in group or direct WhatsApp chats whenever anyone mentions both <code className="text-emerald-400">@</code> and <code className="text-emerald-400">EM</code> (e.g. <b>@EM</b>, <b>@bot EM</b>).
-              </p>
+              <LogViewer logs={logs} />
             </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowSimulator(true)}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold border border-gray-700 transition"
-            >
-              <Play className="w-3.5 h-3.5 text-emerald-400" />
-              Test Mention Simulator
-            </button>
-
-            <button
-              onClick={fetchStatus}
-              className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition"
-              title="Refresh Dashboard"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Top Grid: Usage Table & Anti-Ban Config */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
-            <UsageTable usageData={usageData} />
-          </div>
-          <div>
-            <AntiBanPanel settings={statusInfo} onSaveSettings={handleSaveSettings} />
-          </div>
-        </div>
-
-        {/* Bottom Stream: Live Activity Log Viewer */}
-        <div>
-          <LogViewer logs={logs} />
-        </div>
+          </>
+        )}
 
       </main>
 
