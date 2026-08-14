@@ -31,6 +31,137 @@ const DIST_DIR = path.join(ROOT, "dist");
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 /* ============================================================
+   HACKAI SDK
+============================================================ */
+
+let hackAiSdk = null;
+
+try {
+    hackAiSdk = await import("@razinmohammedpt/hackai-sdk");
+    console.log("✅ HackAI SDK loaded");
+} catch (error) {
+    console.warn("⚠️ HackAI SDK unavailable:", error.message);
+}
+
+/* ============================================================
+   RATE LIMITER (5 responses/day per number)
+============================================================ */
+
+class RateLimiter {
+    constructor(maxDailyLimit = 5) {
+        this.maxDailyLimit = maxDailyLimit;
+        this.ensureDataFile();
+    }
+
+    ensureDataFile() {
+        const USAGE_FILE = path.join(DATA_DIR, "usage.json");
+        if (!fs.existsSync(USAGE_FILE)) {
+            writeJson(USAGE_FILE, {
+                records: {},
+                config: { maxDailyLimit: this.maxDailyLimit }
+            });
+        }
+    }
+
+    getTodayKey() {
+        return new Date().toISOString().split("T")[0];
+    }
+
+    cleanPhoneNumber(rawNumber) {
+        if (!rawNumber) return "Unknown";
+        return String(rawNumber)
+            .replace(/@c\.us|@g\.us|@s\.whatsapp\.net|@lid/g, "")
+            .replace(/[^0-9+]/g, "");
+    }
+
+    loadData() {
+        const USAGE_FILE = path.join(DATA_DIR, "usage.json");
+        return readJson(USAGE_FILE, {
+            records: {},
+            config: { maxDailyLimit: this.maxDailyLimit }
+        });
+    }
+
+    saveData(data) {
+        const USAGE_FILE = path.join(DATA_DIR, "usage.json");
+        writeJson(USAGE_FILE, data);
+    }
+
+    canAccess(phoneNumber) {
+        const cleanNumber = this.cleanPhoneNumber(phoneNumber);
+        const today = this.getTodayKey();
+        const data = this.loadData();
+        const limit = data.config?.maxDailyLimit ?? this.maxDailyLimit;
+        const record = data.records[cleanNumber];
+
+        if (!record || record.lastDate !== today) {
+            return { allowed: true, count: 0, limit, remaining: limit };
+        }
+
+        const count = record.count || 0;
+        return {
+            allowed: count < limit,
+            count,
+            limit,
+            remaining: Math.max(0, limit - count)
+        };
+    }
+
+    recordAccess(phoneNumber, pushName = "") {
+        const cleanNumber = this.cleanPhoneNumber(phoneNumber);
+        const today = this.getTodayKey();
+        const data = this.loadData();
+
+        if (!data.records[cleanNumber] || data.records[cleanNumber].lastDate !== today) {
+            data.records[cleanNumber] = {
+                name: pushName || cleanNumber,
+                count: 1,
+                lastDate: today,
+                lastTimestamp: new Date().toISOString()
+            };
+        } else {
+            data.records[cleanNumber].count += 1;
+            data.records[cleanNumber].name = pushName || data.records[cleanNumber].name;
+            data.records[cleanNumber].lastTimestamp = new Date().toISOString();
+        }
+
+        this.saveData(data);
+        return data.records[cleanNumber];
+    }
+
+    getUsageStats() {
+        const data = this.loadData();
+        const today = this.getTodayKey();
+        const limit = data.config?.maxDailyLimit ?? this.maxDailyLimit;
+        const users = Object.entries(data.records || {})
+            .map(([number, record]) => {
+                const isToday = record.lastDate === today;
+                const count = isToday ? record.count : 0;
+                return {
+                    number,
+                    name: record.name || number,
+                    countToday: count,
+                    limit,
+                    remaining: Math.max(0, limit - count),
+                    status: count >= limit ? "LIMIT_REACHED" : count > 0 ? "ACTIVE" : "IDLE",
+                    lastTimestamp: record.lastTimestamp
+                };
+            })
+            .sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp));
+
+        return {
+            today,
+            maxDailyLimit: limit,
+            totalUsers: users.length,
+            activeToday: users.filter((u) => u.countToday > 0).length,
+            users
+        };
+    }
+}
+
+const rateLimiter = new RateLimiter(5);
+
+/* ============================================================
    SAFE UTILITIES
 ============================================================ */
 
@@ -1067,258 +1198,161 @@ function cacheMessage(msg) {
    MESSAGE HANDLER
 ============================================================ */
 
+const recentlySentBotMessages = new Set();
+
+function extractTargetChatId(msg) {
+    if (!msg) return null;
+    const candidates = [
+        msg.id?.remote,
+        msg.from,
+        msg.to,
+        msg._data?.id?.remote,
+        msg._data?.to,
+        msg._data?.from
+    ];
+
+    for (const id of candidates) {
+        if (typeof id === "string" && id.endsWith("@g.us")) {
+            return id;
+        }
+    }
+
+    for (const id of candidates) {
+        if (typeof id === "string" && (id.endsWith("@c.us") || id.endsWith("@lid"))) {
+            return id;
+        }
+    }
+
+    return typeof msg.from === "string" ? msg.from : null;
+}
+
+/* ============================================================
+   MESSAGE HANDLER
+============================================================ */
+
 async function handleMessage(msg) {
-
     try {
+        if (!msg || !msg.body) return;
 
-        const from =
-            msg?.from || null;
+        const body = String(msg.body || "").trim();
 
-        /*
-          Group messages have @g.us IDs.
-        */
-
-        if (
-            !isGroupId(from)
-        ) {
+        // 1. Skip if message is empty, starts with error prefix, or was sent by our bot
+        if (body.startsWith("⚠️ HackAI") || recentlySentBotMessages.has(body)) {
             return;
         }
 
-        const body =
-            String(msg?.body || "");
+        // 2. Check trigger rule: @AI (case-insensitive)
+        if (!/@ai\b/i.test(body)) {
+            return;
+        }
 
-        /*
-          Cache immediately.
+        const chatId = extractTargetChatId(msg);
+        if (!chatId) return;
 
-          We do NOT call msg.getChat().
-        */
+        const isGroup = chatId.endsWith("@g.us");
 
-        const cached =
-            cacheMessage(msg);
+        log("INFO", `🎯 @AI trigger detected in ${isGroup ? "Group" : "Chat"}`, {
+            chatId,
+            sender: msg.author || msg.from,
+            body: body.slice(0, 100)
+        });
 
-        /*
-          Discover the group directly from
-          message metadata.
-        */
-
-        let groupName =
-            "WhatsApp Group";
-
-        /*
-          Sometimes _data contains chat information.
-        */
-
-        try {
-
-            groupName =
-                msg?._data?.chat?.name ||
-                msg?._data?.chat?.formattedTitle ||
-                msg?._data?.chat?.subject ||
-                groupName;
-
-        } catch {}
-
-        const group =
-            upsertGroup({
-                id: from,
-                name: groupName,
-                source: "message"
-            });
-
-        broadcast(
-            "GROUP_MESSAGE",
-            {
-                group,
-                message: cached
+        // 3. Respect selected target groups if it's a group
+        if (isGroup) {
+            const selected = settings.selectedGroups || ["ALL"];
+            if (!selected.includes("ALL") && !selected.includes(chatId)) {
+                log("INFO", "AI trigger skipped: group is not in target selected groups", { chatId });
+                return;
             }
-        );
+        }
 
-        log(
-            "INFO",
-            `Group message received: ${groupName}`,
-            {
-                groupId: from,
-                body: body.slice(0, 200)
-            }
-        );
+        // 4. Extract clean prompt
+        const prompt = body.replace(/@ai\b/gi, "").trim();
 
-        /*
-          Optional AI trigger.
-        */
+        // 5. Rate limit check (5 responses / day per number)
+        const rawSender = msg.author || msg.from || "unknown";
+        const cleanSender = rawSender.replace(/[^0-9]/g, "");
+        const pushName = msg._data?.notifyName || msg._data?.pushname || cleanSender;
 
-        if (
-            !/@(?:ai|em)\b/i.test(body)
-        ) {
+        const rateCheck = rateLimiter.canAccess(cleanSender);
+        if (!rateCheck.allowed) {
+            log("WARN", `Rate limit exceeded for ${cleanSender} (${rateCheck.count}/${rateCheck.limit})`);
+            await sendGroupMessage(chatId, `⚠️ Daily limit reached (${rateCheck.count}/${rateCheck.limit}). Resets at 00:00 UTC.`);
             return;
         }
 
-        /*
-          Respect selected groups.
-        */
+        rateLimiter.recordAccess(cleanSender, pushName);
+        broadcast("USAGE_UPDATED", rateLimiter.getUsageStats());
 
-        const selected =
-            settings.selectedGroups || ["ALL"];
+        // 6. Generate HackAI SDK response
+        log("INFO", `Generating HackAI answer for ${pushName}...`);
+        const aiReplyText = await generateAIResponse(prompt, pushName);
 
-        if (
-            !selected.includes("ALL") &&
-            !selected.includes(from)
-        ) {
-            log(
-                "INFO",
-                "AI trigger ignored because group is not selected",
-                {
-                    groupId: from
-                }
-            );
+        // Track bot message to prevent self-looping
+        recentlySentBotMessages.add(aiReplyText);
+        setTimeout(() => recentlySentBotMessages.delete(aiReplyText), 60000);
 
-            return;
-        }
+        // 7. Send message to WhatsApp chat
+        await sendGroupMessage(chatId, aiReplyText);
 
-        log(
-            "INFO",
-            "AI trigger detected",
-            {
-                groupId: from,
-                message: body
-            }
-        );
-
-        /*
-          Placeholder AI response.
-
-          Replace generateAIResponse() with your
-          HackAI implementation.
-        */
-
-        const response =
-            await generateAIResponse(
-                body
-            );
-
-        if (!response) {
-            return;
-        }
-
-        await sendGroupMessage(
-            from,
-            response
-        );
+        log("INFO", `✅ HackAI reply sent successfully to ${chatId}`);
+        broadcast("LOG_ADDED", {
+            type: "AI_REPLY",
+            message: `Replied to ${pushName} in ${chatId}`,
+            timestamp: new Date().toISOString()
+        });
 
     } catch (err) {
-
-        log(
-            "ERROR",
-            "Message handler failed",
-            {
-                error: errorString(err)
-            }
-        );
+        log("ERROR", "Message processing error", { error: errorString(err) });
     }
 }
 
 /* ============================================================
-   AI
+   AI (HACKAI SDK EXCLUSIVE)
 ============================================================ */
 
-async function generateAIResponse(prompt) {
+async function generateAIResponse(prompt, senderName = "Friend") {
+    const apiKey = process.env.HACKAI_API_KEY || "";
 
-    const cleaned =
-        String(prompt)
-            .replace(/@(?:ai|em)\b/gi, "")
-            .trim();
-
-    if (!cleaned) {
-        return "Hey! 👋";
+    if (!apiKey) {
+        return "⚠️ HackAI API Key is missing. Please set HACKAI_API_KEY in your .env file.";
     }
 
-    /*
-      If HackAI SDK is installed, you can plug your
-      existing SDK here.
+    const cleanPrompt = String(prompt).replace(/@ai\b/gi, "").trim() || "Hello";
+    const systemInstruction = `You are a helpful, smart WhatsApp AI Assistant for ${senderName}. Keep your answers concise, natural, and helpful. Use WhatsApp markdown (*bold*, _italic_, • bullet points) where appropriate.`;
 
-      This intentionally does not pretend to know the
-      exact API of your private package.
-    */
+    try {
+        let aiText = "";
 
-    if (
-        process.env.HACKAI_API_KEY
-    ) {
-
-        try {
-
-            /*
-              Keep your existing SDK/API implementation
-              here if needed.
-            */
-
-            const response =
-                await fetch(
-                    "https://api.openai.com/v1/chat/completions",
-                    {
-                        method: "POST",
-
-                        headers: {
-                            "Content-Type":
-                                "application/json",
-
-                            Authorization:
-                                `Bearer ${process.env.HACKAI_API_KEY}`
-                        },
-
-                        body: JSON.stringify({
-                            model:
-                                process.env.AI_MODEL ||
-                                "gpt-4o-mini",
-
-                            messages: [
-                                {
-                                    role: "system",
-                                    content:
-                                        "You are a helpful WhatsApp group assistant. Be concise and natural."
-                                },
-                                {
-                                    role: "user",
-                                    content:
-                                        cleaned
-                                }
-                            ],
-
-                            max_tokens: 300
-                        })
-                    }
-                );
-
-            if (response.ok) {
-
-                const data =
-                    await response.json();
-
-                const text =
-                    data?.choices?.[0]
-                        ?.message
-                        ?.content
-                        ?.trim();
-
-                if (text) {
-                    return text;
+        if (hackAiSdk) {
+            const SDKClient = hackAiSdk.Client || hackAiSdk.default || hackAiSdk.HackAI;
+            if (typeof SDKClient === "function") {
+                const clientInstance = new SDKClient({ apiKey });
+                if (typeof clientInstance.chat === "function") {
+                    const res = await clientInstance.chat({ system: systemInstruction, prompt: cleanPrompt });
+                    aiText = res?.text || res?.content || res?.message || "";
+                } else if (typeof clientInstance.generateText === "function") {
+                    const res = await clientInstance.generateText({ system: systemInstruction, prompt: cleanPrompt });
+                    aiText = res?.text || res?.content || res?.message || "";
                 }
+            } else if (typeof hackAiSdk.generateText === "function") {
+                const res = await hackAiSdk.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                aiText = res?.text || res?.content || res?.message || "";
+            } else if (typeof hackAiSdk.chat === "function") {
+                const res = await hackAiSdk.chat({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                aiText = res?.text || res?.content || res?.message || "";
             }
-
-        } catch (err) {
-
-            log(
-                "WARN",
-                "AI request failed",
-                {
-                    error:
-                        errorString(err)
-                }
-            );
         }
-    }
 
-    return (
-        `🤖 I received: "${cleaned.slice(0, 150)}"`
-    );
+        if (aiText && typeof aiText === "string") {
+            return aiText.trim();
+        }
+
+        throw new Error("HackAI SDK returned empty response");
+    } catch (error) {
+        log("ERROR", "HackAI Generation Error", { error: error.message });
+        return `⚠️ HackAI Generation Failed: ${error.message || "Unknown error"}`;
+    }
 }
 
 /* ============================================================
@@ -1630,21 +1664,7 @@ async function initWhatsApp() {
 
         client.on(
             "message_create",
-            msg => {
-
-                if (
-                    msg?.fromMe
-                ) {
-                    log(
-                        "INFO",
-                        "Outgoing message observed",
-                        {
-                            chatId:
-                                msg?.from
-                        }
-                    );
-                }
-            }
+            handleMessage
         );
 
         /* -----------------------------------------
