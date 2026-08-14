@@ -9,11 +9,7 @@ import TestSimulatorModal from './components/TestSimulatorModal.jsx';
 import { Play, Sparkles, RefreshCw, Zap, Shield, LayoutDashboard, QrCode } from 'lucide-react';
 
 export default function App() {
-  const [runnerUrl, setRunnerUrl] = useState(() => {
-    const saved = localStorage.getItem('EM_AGENT_RUNNER_URL');
-    if (saved) return saved;
-    return window.location.port === '5173' ? 'http://localhost:3001' : '';
-  });
+  const [runnerUrl, setRunnerUrl] = useState('http://localhost:3001');
   const [activeTab, setActiveTab] = useState('SETUP'); // SETUP | DASHBOARD
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
