@@ -1,20 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import Header from './components/Header.jsx';
 import SetupWizard from './components/SetupWizard.jsx';
+import GroupSelector from './components/GroupSelector.jsx';
 import QRModal from './components/QRModal.jsx';
 import UsageTable from './components/UsageTable.jsx';
 import AntiBanPanel from './components/AntiBanPanel.jsx';
 import LogViewer from './components/LogViewer.jsx';
-import TestSimulatorModal from './components/TestSimulatorModal.jsx';
-import { Play, RefreshCw, Zap, QrCode, LayoutDashboard } from 'lucide-react';
+import { RefreshCw, Zap, QrCode, LayoutDashboard, Users } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('SETUP'); // SETUP | DASHBOARD
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
+  const [groups, setGroups] = useState([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState(['ALL']);
+  const [loadingGroups, setLoadingGroups] = useState(false);
   const [logs, setLogs] = useState([]);
   const [showQR, setShowQR] = useState(false);
-  const [showSimulator, setShowSimulator] = useState(false);
   const [ws, setWs] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
 
@@ -58,21 +60,26 @@ export default function App() {
       if (data.status) setStatusInfo(data.status);
       if (data.usage) setUsageData(data.usage);
       if (data.status?.logs) setLogs(data.status.logs);
+      if (data.groups) setGroups(data.groups);
+      if (data.selectedGroupIds) setSelectedGroupIds(data.selectedGroupIds);
       if (data.status?.status === 'QR_READY') setShowQR(true);
       if (data.status?.status === 'CONNECTED') {
         setShowQR(false);
-        setActiveTab('DASHBOARD');
       }
     } else if (event === 'STATUS_CHANGED') {
       setStatusInfo((prev) => ({ ...prev, ...data }));
       if (data.status === 'QR_READY') setShowQR(true);
       if (data.status === 'CONNECTED') {
         setShowQR(false);
-        setActiveTab('DASHBOARD');
       }
     } else if (event === 'QR_CODE') {
       setStatusInfo((prev) => ({ ...prev, qrCodeUrl: data.qr }));
       setShowQR(true);
+    } else if (event === 'GROUPS_LIST') {
+      setGroups(data.groups || []);
+      setLoadingGroups(false);
+    } else if (event === 'SELECTED_GROUPS_UPDATED') {
+      setSelectedGroupIds(data.selectedGroupIds || ['ALL']);
     } else if (event === 'USAGE_UPDATED') {
       setUsageData(data);
     } else if (event === 'LOG_ADDED') {
@@ -101,9 +108,30 @@ export default function App() {
     sendWSAction('UPDATE_SETTINGS', newSettings);
   };
 
-  const handleRunTestTrigger = (testData) => {
-    sendWSAction('TEST_TRIGGER', testData);
-    setShowSimulator(false);
+  const handleRefreshGroups = () => {
+    setLoadingGroups(true);
+    sendWSAction('FETCH_GROUPS');
+  };
+
+  const handleToggleGroup = (groupId) => {
+    let next;
+    if (selectedGroupIds.includes('ALL')) {
+      next = [groupId];
+    } else if (selectedGroupIds.includes(groupId)) {
+      next = selectedGroupIds.filter((g) => g !== groupId);
+      if (next.length === 0) next = ['ALL'];
+    } else {
+      next = [...selectedGroupIds, groupId];
+    }
+    setSelectedGroupIds(next);
+    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
+  };
+
+  const handleSelectAllGroups = () => {
+    const isAll = selectedGroupIds.includes('ALL') || (groups.length > 0 && selectedGroupIds.length === groups.length);
+    const next = isAll ? [] : ['ALL'];
+    setSelectedGroupIds(next);
+    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
   };
 
   return (
@@ -115,7 +143,6 @@ export default function App() {
         onConnect={handleConnect}
         onDisconnect={handleDisconnect}
         onOpenQR={() => setShowQR(true)}
-        runnerUrl="ws://localhost:3001"
         wsConnected={wsConnected}
       />
 
@@ -156,11 +183,17 @@ export default function App() {
             onConnect={handleConnect}
             onDisconnect={handleDisconnect}
             onGoToDashboard={() => setActiveTab('DASHBOARD')}
+            groups={groups}
+            selectedGroupIds={selectedGroupIds}
+            onToggleGroup={handleToggleGroup}
+            onSelectAllGroups={handleSelectAllGroups}
+            onRefreshGroups={handleRefreshGroups}
+            loadingGroups={loadingGroups}
           />
         ) : (
           /* DASHBOARD VIEW */
           <>
-            {/* Quick Trigger Rule Bar */}
+            {/* Trigger Activation Bar */}
             <div className="glass-panel p-4 rounded-2xl border border-emerald-500/20 bg-gradient-to-r from-emerald-950/20 via-gray-900 to-gray-900 flex flex-wrap items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
@@ -168,24 +201,24 @@ export default function App() {
                 </div>
                 <div>
                   <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                    Trigger Activation Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@</code> + <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">EM</code>
+                    Trigger Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@AI</code> or <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@EM</code> (Case Insensitive)
                   </h2>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    Responds automatically whenever anyone mentions both <code className="text-emerald-400">@</code> and <code className="text-emerald-400">EM</code> in chats.
+                    Responds in selected WhatsApp group or direct chats when anyone (including yourself) types <code className="text-emerald-400">@AI</code>, <code className="text-emerald-400">@Ai</code>, <code className="text-emerald-400">@ai</code>, or <code className="text-emerald-400">@EM</code>.
                   </p>
                 </div>
               </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowSimulator(true)}
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold border border-gray-700 transition"
-                >
-                  <Play className="w-3.5 h-3.5 text-emerald-400" />
-                  Test Mention Simulator
-                </button>
-              </div>
             </div>
+
+            {/* Target Group Selector */}
+            <GroupSelector
+              groups={groups}
+              selectedGroupIds={selectedGroupIds}
+              onToggleGroup={handleToggleGroup}
+              onSelectAllGroups={handleSelectAllGroups}
+              onRefreshGroups={handleRefreshGroups}
+              loading={loadingGroups}
+            />
 
             {/* Top Grid: Usage Table & Anti-Ban Config */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -208,7 +241,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-gray-800/80 py-4 text-center text-xs text-gray-500">
-        WhatsApp @EM AI Agent Powered by Pure WebSockets & Headless Chrome • 5 Responses/Day Rate Limiter
+        WhatsApp @AI Agent Powered by HackAI SDK • 5 Responses/Day Rate Limiter • Group Selector Active
       </footer>
 
       {/* QR Code Modal */}
@@ -219,13 +252,6 @@ export default function App() {
           onRefresh={handleConnect}
         />
       )}
-
-      {/* Test Simulator Modal */}
-      <TestSimulatorModal
-        isOpen={showSimulator}
-        onClose={() => setShowSimulator(false)}
-        onRunTest={handleRunTestTrigger}
-      />
 
     </div>
   );

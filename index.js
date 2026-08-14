@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3001;
 const HACKAI_API_KEY = process.env.HACKAI_API_KEY || '';
 const DATA_DIR = path.resolve('./data');
 const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
+const GROUPS_FILE = path.join(DATA_DIR, 'selected_groups.json');
 
 // --- 1. HackAI SDK Dynamic Import ---
 let hackAiSdk = null;
@@ -137,7 +138,26 @@ class RateLimiter {
 
 const rateLimiter = new RateLimiter();
 
-// --- 3. AI Service with Smart Auto-Detect Response Engine ---
+// --- 3. Selected Groups Store ---
+function loadSelectedGroups() {
+  try {
+    if (fs.existsSync(GROUPS_FILE)) {
+      return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf-8')).groups || ['ALL'];
+    }
+  } catch (e) {}
+  return ['ALL'];
+}
+
+function saveSelectedGroups(groupsArray) {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(GROUPS_FILE, JSON.stringify({ groups: groupsArray }, null, 2));
+  } catch (e) {}
+}
+
+let selectedGroupIds = loadSelectedGroups();
+
+// --- 4. AI Service ---
 class AIService {
   constructor() {
     this.mode = 'AUTO'; // AUTO | SHORT_HUMAN | HIGH_DETAIL
@@ -145,7 +165,7 @@ class AIService {
 
   detectDesiredMode(prompt) {
     if (!prompt) return 'SHORT_HUMAN';
-    const clean = prompt.replace(/@EM|@\w+/gi, '').trim().toLowerCase();
+    const clean = prompt.replace(/@(ai|em)/gi, '').trim().toLowerCase();
     const highDetailKeywords = ['detail', 'explain', 'step by step', 'guide', 'code', 'tutorial', 'compare', 'how to', 'why'];
     return (highDetailKeywords.some(k => clean.includes(k)) || clean.length > 140) ? 'HIGH_DETAIL' : 'SHORT_HUMAN';
   }
@@ -182,10 +202,10 @@ class AIService {
         }
       }
 
-      const cleanQuery = prompt.replace(/@EM|@\w+/gi, '').trim();
+      const cleanQuery = prompt.replace(/@(ai|em)/gi, '').trim();
       return effectiveMode === 'SHORT_HUMAN'
-        ? `Hey ${senderName}! Regarding "${cleanQuery.slice(0, 35)}...": I'm on it! Let me know if you need more details. 👍`
-        : `🤖 *EM AI Assistant Report*\n\nHello ${senderName}! Here is the detailed summary for "${cleanQuery}":\n\n• Processed via HackAI Engine.\n• Daily access limit: 5/5 max.\n• Anti-ban typing protection active.`;
+        ? `Hey ${senderName}! Regarding "${cleanQuery.slice(0, 35)}...": I'm on it! Let me know if you need anything else. 👍`
+        : `🤖 *AI Assistant Report*\n\nHello ${senderName}! Here is the requested info for "${cleanQuery}":\n\n• Powered by HackAI SDK Engine.\n• Rate limit: 5/5 max per number.\n• Anti-ban protection active.`;
     } catch (e) {
       return `Hey ${senderName}, got your message regarding "${prompt.slice(0, 30)}"!`;
     }
@@ -194,7 +214,7 @@ class AIService {
 
 const aiService = new AIService();
 
-// --- 4. Anti-Ban Safety Engine ---
+// --- 5. Anti-Ban Safety Engine ---
 class AntiBanEngine {
   constructor() {
     this.minDelayMs = 2500;
@@ -218,7 +238,7 @@ class AntiBanEngine {
 
 const antiBan = new AntiBanEngine();
 
-// --- 5. WhatsApp Agent Engine (Headless Chrome + whatsapp-web.js) ---
+// --- 6. WhatsApp Agent Engine (Headless Chrome + whatsapp-web.js) ---
 let client = null;
 let agentStatus = 'DISCONNECTED'; // DISCONNECTED | INITIALIZING | QR_READY | CONNECTED
 let qrCodeUrl = '';
@@ -236,6 +256,23 @@ function addLog(type, message, details = {}) {
   logs.unshift(logItem);
   if (logs.length > 50) logs.pop();
   broadcastWS('LOG_ADDED', logItem);
+}
+
+async function fetchRealGroups() {
+  if (!client || agentStatus !== 'CONNECTED') return [];
+  try {
+    const chats = await client.getChats();
+    return chats
+      .filter(c => c.isGroup)
+      .map(c => ({
+        id: c.id._serialized,
+        name: c.name || 'Unnamed Group',
+        unreadCount: c.unreadCount || 0,
+        participantCount: c.participants ? c.participants.length : 0
+      }));
+  } catch (e) {
+    return [];
+  }
 }
 
 async function initWhatsApp() {
@@ -283,7 +320,10 @@ async function initWhatsApp() {
     agentStatus = 'CONNECTED';
     userPhone = client.info?.wid?.user || 'Connected User';
     broadcastWS('STATUS_CHANGED', { status: agentStatus, phone: userPhone });
-    addLog('INFO', `🤖 WhatsApp EM AI Agent is LIVE & READY for user: +${userPhone}`);
+    addLog('INFO', `🤖 WhatsApp AI Agent is LIVE & READY for user: +${userPhone}`);
+
+    const groups = await fetchRealGroups();
+    broadcastWS('GROUPS_LIST', { groups });
   });
 
   client.on('disconnected', (reason) => {
@@ -295,28 +335,37 @@ async function initWhatsApp() {
     addLog('ERROR', `WhatsApp client disconnected: ${reason}`);
   });
 
-  client.on('message', async (msg) => {
-    if (msg.fromMe) return;
+  // Handle messages (including self-messages and group messages)
+  const handleIncomingMsg = async (msg) => {
     const body = msg.body || '';
 
-    // Trigger filter: contains '@' AND 'EM'
-    const hasAt = body.includes('@');
-    const hasEM = /\bEM\b|@EM/i.test(body);
+    // Trigger Rule: @AI, @Ai, @aI, @ai, @EM, @em (case insensitive)
+    const isTriggered = /@(ai|em)/i.test(body) || (body.includes('@') && /\b(AI|EM)\b/i.test(body));
 
-    if (hasAt && hasEM) {
-      const senderNumber = msg.from;
+    if (isTriggered) {
+      const chat = await msg.getChat().catch(() => null);
+
+      // Group Selection Filter
+      if (chat && chat.isGroup) {
+        const isAll = selectedGroupIds.includes('ALL');
+        const isSelected = selectedGroupIds.includes(chat.id._serialized);
+        if (!isAll && !isSelected) {
+          return; // Skip groups not selected by user
+        }
+      }
+
+      const senderNumber = msg.author || msg.from;
       const cleanNumber = rateLimiter.cleanPhoneNumber(senderNumber);
       const contact = await msg.getContact().catch(() => ({ pushname: cleanNumber }));
       const pushName = contact.pushname || contact.name || cleanNumber;
 
-      addLog('TRIGGER', `Received @EM mention from +${cleanNumber} (${pushName})`, { message: body, sender: cleanNumber });
+      addLog('TRIGGER', `Received @AI/@EM trigger from +${cleanNumber} (${pushName})`, { message: body, sender: cleanNumber, chat: chat?.name });
 
       // Check Rate Limit (Max 5/day per number)
       const accessCheck = rateLimiter.canAccess(senderNumber);
 
       if (!accessCheck.allowed) {
         addLog('RATE_LIMIT', `Denied +${cleanNumber}: Daily limit reached (${accessCheck.count}/${accessCheck.limit})`, { sender: cleanNumber });
-        const chat = await msg.getChat().catch(() => null);
         if (chat) {
           await antiBan.executeAntiBanRoutine(chat, 50);
           await msg.reply(`⚠️ *Daily Limit Reached*\n\nHello +${cleanNumber}, you have reached your quota of ${accessCheck.limit} AI responses for today. Resets at 00:00 UTC.`);
@@ -325,9 +374,8 @@ async function initWhatsApp() {
         return;
       }
 
-      // Execute Anti-Ban routine & AI response
-      const chat = await msg.getChat().catch(() => null);
-      addLog('INFO', `Executing Anti-Ban typing simulation for +${cleanNumber}...`);
+      // Anti-Ban Routine & AI Response
+      addLog('INFO', `Executing Anti-Ban typing simulation...`);
       await antiBan.executeAntiBanRoutine(chat, body.length);
 
       addLog('INFO', `Generating AI response using HackAI SDK...`);
@@ -341,6 +389,13 @@ async function initWhatsApp() {
 
       broadcastWS('USAGE_UPDATED', rateLimiter.getUsageStats());
     }
+  };
+
+  client.on('message', handleIncomingMsg);
+  client.on('message_create', async (msg) => {
+    if (msg.fromMe) {
+      await handleIncomingMsg(msg);
+    }
   });
 
   await client.initialize().catch(err => {
@@ -349,7 +404,7 @@ async function initWhatsApp() {
   });
 }
 
-// --- 6. Express Web App & Pure WebSocket Server ---
+// --- 7. Express Web App & Pure WebSocket Server ---
 const app = express();
 app.use(express.json());
 
@@ -367,8 +422,10 @@ function broadcastWS(event, data) {
   }
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', async (ws) => {
   activeSockets.add(ws);
+
+  const groups = await fetchRealGroups();
 
   // Send current state on WebSocket connection
   ws.send(JSON.stringify({
@@ -382,7 +439,9 @@ wss.on('connection', (ws) => {
         antiBan: antiBan,
         logs: logs.slice(0, 50)
       },
-      usage: rateLimiter.getUsageStats()
+      usage: rateLimiter.getUsageStats(),
+      groups,
+      selectedGroupIds
     }
   }));
 
@@ -406,18 +465,16 @@ wss.on('connection', (ws) => {
         if (payload.maxDailyLimit) rateLimiter.setDailyLimit(payload.maxDailyLimit);
         broadcastWS('SETTINGS_UPDATED', { mode: aiService.mode, maxDailyLimit: rateLimiter.getUsageStats().maxDailyLimit });
         addLog('INFO', 'Updated AI & Rate limit settings.');
-      } else if (action === 'TEST_TRIGGER') {
-        // Direct WebSocket Simulator Test Trigger
-        const mockMsg = {
-          from: payload.phoneNumber || '+919876543210',
-          body: payload.message || '@EM Hello AI',
-          fromMe: false,
-          getContact: async () => ({ pushname: payload.pushName || 'Test User' }),
-          getChat: async () => ({ sendStateTyping: async () => {}, clearState: async () => {} }),
-          reply: async (text) => addLog('AI_REPLY', `[Simulator Reply to ${payload.phoneNumber}]: ${text}`)
-        };
-        const event = client ? client.listeners('message')[0] : null;
-        if (event) event(mockMsg);
+      } else if (action === 'FETCH_GROUPS') {
+        const currentGroups = await fetchRealGroups();
+        ws.send(JSON.stringify({ event: 'GROUPS_LIST', data: { groups: currentGroups } }));
+      } else if (action === 'SET_SELECTED_GROUPS') {
+        if (Array.isArray(payload.groups)) {
+          selectedGroupIds = payload.groups;
+          saveSelectedGroups(selectedGroupIds);
+          broadcastWS('SELECTED_GROUPS_UPDATED', { selectedGroupIds });
+          addLog('INFO', `Updated target WhatsApp groups selection (${selectedGroupIds.length} active).`);
+        }
       }
     } catch (e) {}
   });
