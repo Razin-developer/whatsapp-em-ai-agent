@@ -1374,54 +1374,104 @@ async function generateAIResponse(prompt, senderName = "Friend") {
                         Object.getOwnPropertyNames(Object.getPrototypeOf(clientInstance) || {})
                     );
 
-                    log("INFO", "[AI CALL] Client instance methods", { methods: methodNames });
+                    log("INFO", "[AI CALL] Client instance info", {
+                        baseUrl: clientInstance.baseUrl || clientInstance._baseUrl || "none",
+                        methods: methodNames
+                    });
 
-                    // Try method 1: clientInstance.chat()
-                    if (typeof clientInstance.chat === "function") {
-                        try {
-                            log("INFO", "[AI CALL] Calling clientInstance.chat()...");
-                            const res = await clientInstance.chat({
-                                apiKey,
-                                system: systemInstruction,
-                                prompt: cleanPrompt,
-                                messages: [
-                                    { role: "system", content: systemInstruction },
-                                    { role: "user", content: cleanPrompt }
-                                ]
-                            });
-                            log("INFO", "[AI CALL] clientInstance.chat() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
-                            aiText = extractTextFromResponse(res);
-                        } catch (err1) {
-                            log("WARN", "[AI CALL] clientInstance.chat() failed", { error: err1.message });
+                    const candidateModels = [
+                        process.env.AI_MODEL || "gpt-4o-mini",
+                        "openai/gpt-4o-mini",
+                        "gpt-4o",
+                        "gpt-3.5-turbo"
+                    ];
+
+                    // Method A: clientInstance.chat.completions.create with explicit model
+                    if (clientInstance.chat?.completions?.create) {
+                        for (const modelName of candidateModels) {
+                            try {
+                                log("INFO", `[AI CALL] Calling clientInstance.chat.completions.create({ model: "${modelName}" })...`);
+                                const res = await clientInstance.chat.completions.create({
+                                    model: modelName,
+                                    messages: [
+                                        { role: "system", content: systemInstruction },
+                                        { role: "user", content: cleanPrompt }
+                                    ]
+                                });
+                                log("INFO", "[AI CALL] completions.create() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                                aiText = extractTextFromResponse(res);
+                                if (aiText) break;
+                            } catch (errModel) {
+                                log("WARN", `[AI CALL] completions.create({ model: "${modelName}" }) failed`, { error: errModel.message });
+                            }
                         }
                     }
 
-                    // Try method 2: clientInstance.generateText()
-                    if (!aiText && typeof clientInstance.generateText === "function") {
-                        try {
-                            log("INFO", "[AI CALL] Calling clientInstance.generateText()...");
-                            const res = await clientInstance.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
-                            log("INFO", "[AI CALL] clientInstance.generateText() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
-                            aiText = extractTextFromResponse(res);
-                        } catch (err2) {
-                            log("WARN", "[AI CALL] clientInstance.generateText() failed", { error: err2.message });
+                    // Method B: clientInstance.chat() with explicit model
+                    if (!aiText && typeof clientInstance.chat === "function") {
+                        for (const modelName of candidateModels) {
+                            try {
+                                log("INFO", `[AI CALL] Calling clientInstance.chat({ model: "${modelName}" })...`);
+                                const res = await clientInstance.chat({
+                                    model: modelName,
+                                    apiKey,
+                                    system: systemInstruction,
+                                    prompt: cleanPrompt,
+                                    messages: [
+                                        { role: "system", content: systemInstruction },
+                                        { role: "user", content: cleanPrompt }
+                                    ]
+                                });
+                                log("INFO", "[AI CALL] clientInstance.chat() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                                aiText = extractTextFromResponse(res);
+                                if (aiText) break;
+                            } catch (err1) {
+                                log("WARN", `[AI CALL] clientInstance.chat({ model: "${modelName}" }) failed`, { error: err1.message });
+                            }
                         }
                     }
 
-                    // Try method 3: clientInstance.chat.completions.create()
-                    if (!aiText && clientInstance.chat?.completions?.create) {
-                        try {
-                            log("INFO", "[AI CALL] Calling clientInstance.chat.completions.create()...");
-                            const res = await clientInstance.chat.completions.create({
-                                messages: [
-                                    { role: "system", content: systemInstruction },
-                                    { role: "user", content: cleanPrompt }
-                                ]
-                            });
-                            log("INFO", "[AI CALL] completions.create() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
-                            aiText = extractTextFromResponse(res);
-                        } catch (err3) {
-                            log("WARN", "[AI CALL] completions.create() failed", { error: err3.message });
+                    // Method C: clientInstance.responses.create()
+                    if (!aiText && clientInstance.responses?.create) {
+                        for (const modelName of candidateModels) {
+                            try {
+                                log("INFO", `[AI CALL] Calling clientInstance.responses.create({ model: "${modelName}" })...`);
+                                const res = await clientInstance.responses.create({
+                                    model: modelName,
+                                    input: cleanPrompt,
+                                    prompt: cleanPrompt
+                                });
+                                log("INFO", "[AI CALL] responses.create() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                                aiText = extractTextFromResponse(res);
+                                if (aiText) break;
+                            } catch (errResp) {
+                                log("WARN", `[AI CALL] responses.create({ model: "${modelName}" }) failed`, { error: errResp.message });
+                            }
+                        }
+                    }
+
+                    // Method D: clientInstance.request() if available
+                    if (!aiText && typeof clientInstance.request === "function") {
+                        for (const modelName of candidateModels) {
+                            try {
+                                log("INFO", `[AI CALL] Calling clientInstance.request({ path: "/chat/completions", model: "${modelName}" })...`);
+                                const res = await clientInstance.request({
+                                    path: "/chat/completions",
+                                    method: "POST",
+                                    body: {
+                                        model: modelName,
+                                        messages: [
+                                            { role: "system", content: systemInstruction },
+                                            { role: "user", content: cleanPrompt }
+                                        ]
+                                    }
+                                });
+                                log("INFO", "[AI CALL] clientInstance.request() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
+                                aiText = extractTextFromResponse(res);
+                                if (aiText) break;
+                            } catch (errReq) {
+                                log("WARN", `[AI CALL] clientInstance.request({ model: "${modelName}" }) failed`, { error: errReq.message });
+                            }
                         }
                     }
                 }
@@ -1431,7 +1481,7 @@ async function generateAIResponse(prompt, senderName = "Friend") {
             if (!aiText && typeof hackAiSdk.generateText === "function") {
                 try {
                     log("INFO", "[AI CALL] Calling hackAiSdk.generateText()...");
-                    const res = await hackAiSdk.generateText({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                    const res = await hackAiSdk.generateText({ apiKey, model: "gpt-4o-mini", system: systemInstruction, prompt: cleanPrompt });
                     log("INFO", "[AI CALL] hackAiSdk.generateText() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
                     aiText = extractTextFromResponse(res);
                 } catch (err4) {
@@ -1442,7 +1492,7 @@ async function generateAIResponse(prompt, senderName = "Friend") {
             if (!aiText && typeof hackAiSdk.chat === "function") {
                 try {
                     log("INFO", "[AI CALL] Calling hackAiSdk.chat()...");
-                    const res = await hackAiSdk.chat({ apiKey, system: systemInstruction, prompt: cleanPrompt });
+                    const res = await hackAiSdk.chat({ apiKey, model: "gpt-4o-mini", system: systemInstruction, prompt: cleanPrompt });
                     log("INFO", "[AI CALL] hackAiSdk.chat() raw response", { raw: JSON.stringify(res)?.slice(0, 300) });
                     aiText = extractTextFromResponse(res);
                 } catch (err5) {
@@ -1455,38 +1505,42 @@ async function generateAIResponse(prompt, senderName = "Friend") {
         if (!aiText) {
             log("INFO", "[AI CALL] Attempting HTTP fallback API call...");
             const endpoints = [
+                "https://api.openai.com/v1/chat/completions",
                 "https://api.hackai.io/v1/chat/completions",
                 "https://api.hackai.dev/v1/chat/completions"
             ];
 
             for (const endpoint of endpoints) {
-                try {
-                    log("INFO", `[AI CALL] Trying HTTP endpoint: ${endpoint}`);
-                    const httpRes = await fetch(endpoint, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "Authorization": `Bearer ${apiKey}`
-                        },
-                        body: JSON.stringify({
-                            model: "hackai-v1",
-                            messages: [
-                                { role: "system", content: systemInstruction },
-                                { role: "user", content: cleanPrompt }
-                            ]
-                        })
-                    });
+                for (const modelName of ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]) {
+                    try {
+                        log("INFO", `[AI CALL] Trying HTTP endpoint: ${endpoint} with model: ${modelName}`);
+                        const httpRes = await fetch(endpoint, {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "Authorization": `Bearer ${apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: modelName,
+                                messages: [
+                                    { role: "system", content: systemInstruction },
+                                    { role: "user", content: cleanPrompt }
+                                ]
+                            })
+                        });
 
-                    log("INFO", `[AI CALL] HTTP status from ${endpoint}: ${httpRes.status}`);
-                    if (httpRes.ok) {
-                        const data = await httpRes.json();
-                        log("INFO", `[AI CALL] HTTP JSON response`, { data: JSON.stringify(data)?.slice(0, 300) });
-                        aiText = extractTextFromResponse(data);
-                        if (aiText) break;
+                        log("INFO", `[AI CALL] HTTP status from ${endpoint}: ${httpRes.status}`);
+                        if (httpRes.ok) {
+                            const data = await httpRes.json();
+                            log("INFO", `[AI CALL] HTTP JSON response`, { data: JSON.stringify(data)?.slice(0, 300) });
+                            aiText = extractTextFromResponse(data);
+                            if (aiText) break;
+                        }
+                    } catch (fetchErr) {
+                        log("WARN", `[AI CALL] HTTP endpoint ${endpoint} (${modelName}) failed: ${fetchErr.message}`);
                     }
-                } catch (fetchErr) {
-                    log("WARN", `[AI CALL] HTTP endpoint ${endpoint} failed: ${fetchErr.message}`);
                 }
+                if (aiText) break;
             }
         }
 
