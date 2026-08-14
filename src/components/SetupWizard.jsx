@@ -11,6 +11,7 @@ export default function SetupWizard({
   selectedGroupIds = [],
   onToggleGroup,
   onSelectAllGroups,
+  onDeselectAllGroups,
   onRefreshGroups,
   loadingGroups
 }) {
@@ -74,6 +75,7 @@ export default function SetupWizard({
               selectedGroupIds={selectedGroupIds}
               onToggleGroup={onToggleGroup}
               onSelectAllGroups={onSelectAllGroups}
+              onDeselectAllGroups={onDeselectAllGroups}
               onRefreshGroups={onRefreshGroups}
               loading={loadingGroups}
             />

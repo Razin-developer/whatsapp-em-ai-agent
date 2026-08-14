@@ -45,7 +45,7 @@ export default function UsageTable({ usageData }) {
             {users.length === 0 ? (
               <tr>
                 <td colSpan="5" className="py-8 text-center text-gray-500">
-                  No interactions recorded today yet. Mention <b>@EM</b> on WhatsApp to trigger!
+                  No interactions recorded today yet. Mention <b>@AI</b> on WhatsApp to trigger!
                 </td>
               </tr>
             ) : (

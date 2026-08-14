@@ -116,20 +116,30 @@ export default function App() {
   const handleToggleGroup = (groupId) => {
     let next;
     if (selectedGroupIds.includes('ALL')) {
-      next = [groupId];
+      // If ALL was selected, toggling this group unchecks it while keeping all other groups checked
+      next = groups.map((g) => g.id).filter((id) => id !== groupId);
     } else if (selectedGroupIds.includes(groupId)) {
+      // Uncheck this group
       next = selectedGroupIds.filter((g) => g !== groupId);
-      if (next.length === 0) next = ['ALL'];
     } else {
-      next = [...selectedGroupIds, groupId];
+      // Check this group
+      next = [...selectedGroupIds.filter((id) => id !== 'ALL'), groupId];
+      if (groups.length > 0 && next.length === groups.length) {
+        next = ['ALL'];
+      }
     }
     setSelectedGroupIds(next);
     sendWSAction('SET_SELECTED_GROUPS', { groups: next });
   };
 
   const handleSelectAllGroups = () => {
-    const isAll = selectedGroupIds.includes('ALL') || (groups.length > 0 && selectedGroupIds.length === groups.length);
-    const next = isAll ? [] : ['ALL'];
+    const next = ['ALL'];
+    setSelectedGroupIds(next);
+    sendWSAction('SET_SELECTED_GROUPS', { groups: next });
+  };
+
+  const handleDeselectAllGroups = () => {
+    const next = [];
     setSelectedGroupIds(next);
     sendWSAction('SET_SELECTED_GROUPS', { groups: next });
   };
@@ -187,6 +197,7 @@ export default function App() {
             selectedGroupIds={selectedGroupIds}
             onToggleGroup={handleToggleGroup}
             onSelectAllGroups={handleSelectAllGroups}
+            onDeselectAllGroups={handleDeselectAllGroups}
             onRefreshGroups={handleRefreshGroups}
             loadingGroups={loadingGroups}
           />
@@ -216,6 +227,7 @@ export default function App() {
               selectedGroupIds={selectedGroupIds}
               onToggleGroup={handleToggleGroup}
               onSelectAllGroups={handleSelectAllGroups}
+              onDeselectAllGroups={handleDeselectAllGroups}
               onRefreshGroups={handleRefreshGroups}
               loading={loadingGroups}
             />

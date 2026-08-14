@@ -23,7 +23,7 @@ export default function QRModal({ qrCodeUrl, onClose, onRefresh }) {
           </div>
           <h2 className="text-xl font-bold text-white">Scan WhatsApp QR Code</h2>
           <p className="text-xs text-gray-400 mt-1">
-            Connect your WhatsApp account to enable the @EM AI Agent
+            Connect your WhatsApp account to enable the @AI Agent
           </p>
         </div>
 

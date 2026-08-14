@@ -1,2384 +1,2438 @@
-import express from 'express';
-import http from 'http';
-import { WebSocketServer } from 'ws';
-import path from 'path';
-import fs from 'fs';
-import dotenv from 'dotenv';
-import qrcode from 'qrcode';
-import pkg from 'whatsapp-web.js';
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
+import path from "path";
+import fs from "fs";
+import dotenv from "dotenv";
+import qrcode from "qrcode";
+import pkg from "whatsapp-web.js";
 
 const { Client, LocalAuth } = pkg;
 
 dotenv.config();
 
-/* =========================================================
+/* ============================================================
    CONFIG
-========================================================= */
+============================================================ */
 
 const PORT = Number(process.env.PORT || 3001);
 
-const HACKAI_API_KEY =
-  process.env.HACKAI_API_KEY || '';
+const ROOT = process.cwd();
 
-const DATA_DIR = path.resolve('./data');
+const DATA_DIR = path.join(ROOT, "data");
+const AUTH_DIR = path.join(DATA_DIR, "whatsapp-auth");
 
-const USAGE_FILE =
-  path.join(DATA_DIR, 'usage.json');
+const GROUPS_FILE = path.join(DATA_DIR, "groups.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+const LOG_FILE = path.join(DATA_DIR, "agent.log");
 
-const GROUPS_FILE =
-  path.join(DATA_DIR, 'selected_groups.json');
-
-const AUTH_DIR =
-  path.join(DATA_DIR, 'whatsapp-auth');
-
-const DIST_DIR =
-  path.resolve('./dist');
+const DIST_DIR = path.join(ROOT, "dist");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(AUTH_DIR, { recursive: true });
 
-/* =========================================================
+/* ============================================================
+   SAFE UTILITIES
+============================================================ */
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function safeJsonParse(value, fallback) {
+    try {
+        return JSON.parse(value);
+    } catch {
+        return fallback;
+    }
+}
+
+function writeJson(file, value) {
+    try {
+        fs.writeFileSync(
+            file,
+            JSON.stringify(value, null, 2),
+            "utf8"
+        );
+    } catch (err) {
+        console.error("Failed writing", file, err.message);
+    }
+}
+
+function readJson(file, fallback) {
+    try {
+        if (!fs.existsSync(file)) {
+            return fallback;
+        }
+
+        return safeJsonParse(
+            fs.readFileSync(file, "utf8"),
+            fallback
+        );
+    } catch {
+        return fallback;
+    }
+}
+
+function normalizeId(id) {
+    if (!id) return null;
+
+    if (typeof id === "string") {
+        return id;
+    }
+
+    if (id._serialized) {
+        return id._serialized;
+    }
+
+    if (id.user && id.server) {
+        return `${id.user}@${id.server}`;
+    }
+
+    return null;
+}
+
+function isGroupId(id) {
+    return typeof id === "string" && id.endsWith("@g.us");
+}
+
+function errorString(err) {
+    if (!err) return "Unknown error";
+
+    if (typeof err === "string") {
+        return err;
+    }
+
+    return (
+        err?.stack ||
+        err?.message ||
+        String(err)
+    );
+}
+
+/* ============================================================
    LOGGING
-========================================================= */
+============================================================ */
 
-let logs = [];
+const logs = [];
 
-function addLog(type, message, details = {}) {
-  const logItem = {
-    id:
-      Date.now() +
-      Math.random().toString(36).substring(2, 7),
-
-    type,
-    message,
-    details,
-    timestamp: new Date().toISOString()
-  };
-
-  logs.unshift(logItem);
-
-  if (logs.length > 100) {
-    logs.length = 100;
-  }
-
-  console.log(
-    `[${type}] ${message}`,
-    Object.keys(details).length
-      ? details
-      : ''
-  );
-
-  broadcastWS('LOG_ADDED', logItem);
-}
-
-/* =========================================================
-   HACKAI SDK
-========================================================= */
-
-let hackAiSdk = null;
-
-try {
-  hackAiSdk =
-    await import('@razinmohammedpt/hackai-sdk');
-
-  console.log('✅ HackAI SDK loaded');
-} catch (error) {
-  console.warn(
-    '⚠️ HackAI SDK unavailable:',
-    error.message
-  );
-}
-
-/* =========================================================
-   RATE LIMITER
-========================================================= */
-
-class RateLimiter {
-  constructor(maxDailyLimit = 5) {
-    this.maxDailyLimit = maxDailyLimit;
-    this.ensureDataFile();
-  }
-
-  ensureDataFile() {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-
-    if (!fs.existsSync(USAGE_FILE)) {
-      fs.writeFileSync(
-        USAGE_FILE,
-        JSON.stringify(
-          {
-            records: {},
-            config: {
-              maxDailyLimit: this.maxDailyLimit
-            }
-          },
-          null,
-          2
-        )
-      );
-    }
-  }
-
-  getTodayKey() {
-    return new Date()
-      .toISOString()
-      .split('T')[0];
-  }
-
-  cleanPhoneNumber(rawNumber) {
-    if (!rawNumber) {
-      return 'Unknown';
-    }
-
-    return String(rawNumber)
-      .replace(
-        /@c\.us|@g\.us|@s\.whatsapp\.net/g,
-        ''
-      )
-      .replace(/[^0-9+]/g, '');
-  }
-
-  loadData() {
-    try {
-      this.ensureDataFile();
-
-      return JSON.parse(
-        fs.readFileSync(
-          USAGE_FILE,
-          'utf8'
-        )
-      );
-    } catch (error) {
-      console.error(
-        'Failed to load usage data:',
-        error
-      );
-
-      return {
-        records: {},
-        config: {
-          maxDailyLimit:
-            this.maxDailyLimit
-        }
-      };
-    }
-  }
-
-  saveData(data) {
-    try {
-      this.ensureDataFile();
-
-      fs.writeFileSync(
-        USAGE_FILE,
-        JSON.stringify(
-          data,
-          null,
-          2
-        )
-      );
-    } catch (error) {
-      console.error(
-        'Failed to save usage data:',
-        error
-      );
-    }
-  }
-
-  canAccess(phoneNumber) {
-    const cleanNumber =
-      this.cleanPhoneNumber(phoneNumber);
-
-    const today =
-      this.getTodayKey();
-
-    const data =
-      this.loadData();
-
-    const limit =
-      data.config?.maxDailyLimit ??
-      this.maxDailyLimit;
-
-    const record =
-      data.records[cleanNumber];
-
-    if (
-      !record ||
-      record.lastDate !== today
-    ) {
-      return {
-        allowed: true,
-        count: 0,
-        limit,
-        remaining: limit
-      };
-    }
-
-    const count =
-      record.count || 0;
-
-    return {
-      allowed: count < limit,
-      count,
-      limit,
-      remaining: Math.max(
-        0,
-        limit - count
-      )
+function log(level, message, details = null) {
+    const entry = {
+        timestamp: new Date().toISOString(),
+        level,
+        message,
+        details
     };
-  }
 
-  recordAccess(
-    phoneNumber,
-    pushName = ''
-  ) {
-    const cleanNumber =
-      this.cleanPhoneNumber(phoneNumber);
+    logs.unshift(entry);
 
-    const today =
-      this.getTodayKey();
+    if (logs.length > 200) {
+        logs.length = 200;
+    }
 
-    const data =
-      this.loadData();
+    const line =
+        `[${level}] ${message}` +
+        (details ? ` ${JSON.stringify(details)}` : "");
 
-    if (
-      !data.records[cleanNumber] ||
-      data.records[cleanNumber].lastDate !== today
-    ) {
-      data.records[cleanNumber] = {
+    console.log(line);
+
+    try {
+        fs.appendFileSync(
+            LOG_FILE,
+            line + "\n",
+            "utf8"
+        );
+    } catch {}
+}
+
+/* ============================================================
+   SETTINGS
+============================================================ */
+
+const defaultSettings = {
+    typingEnabled: true,
+    minTypingMs: 1200,
+    maxTypingMs: 3500,
+    selectedGroups: ["ALL"]
+};
+
+let settings = {
+    ...defaultSettings,
+    ...readJson(SETTINGS_FILE, {})
+};
+
+function saveSettings() {
+    writeJson(SETTINGS_FILE, settings);
+}
+
+/* ============================================================
+   GROUP DATABASE
+============================================================ */
+
+/*
+   IMPORTANT:
+
+   We intentionally DO NOT use:
+
+       client.getChats()
+
+   because your installed whatsapp-web.js currently crashes
+   inside window.WWebJS.getChats().
+
+   Instead, groups are discovered through:
+
+   1. Incoming messages
+   2. Direct page-side WhatsApp stores when available
+   3. Explicit group IDs
+*/
+
+const storedGroups = new Map();
+
+function loadStoredGroups() {
+    const data = readJson(GROUPS_FILE, {
+        groups: []
+    });
+
+    if (!Array.isArray(data.groups)) {
+        return;
+    }
+
+    for (const group of data.groups) {
+        if (!group?.id) continue;
+
+        storedGroups.set(group.id, {
+            id: group.id,
+            name: group.name || "Unnamed Group",
+            participantCount: group.participantCount || 0,
+            unreadCount: group.unreadCount || 0,
+            lastSeen: group.lastSeen || null,
+            source: group.source || "storage"
+        });
+    }
+}
+
+function saveStoredGroups() {
+    writeJson(GROUPS_FILE, {
+        updatedAt: new Date().toISOString(),
+        groups: Array.from(storedGroups.values())
+    });
+}
+
+loadStoredGroups();
+
+function upsertGroup(group) {
+    if (!group) return null;
+
+    const id =
+        normalizeId(group.id) ||
+        normalizeId(group._serialized);
+
+    if (!isGroupId(id)) {
+        return null;
+    }
+
+    const existing = storedGroups.get(id) || {};
+
+    const updated = {
+        ...existing,
+        id,
+
         name:
-          pushName ||
-          cleanNumber,
+            group.name ||
+            group.subject ||
+            existing.name ||
+            "Unnamed Group",
 
-        count: 1,
+        participantCount:
+            Number(
+                group.participantCount ??
+                group.participants?.length ??
+                existing.participantCount ??
+                0
+            ),
 
-        lastDate: today,
+        unreadCount:
+            Number(
+                group.unreadCount ??
+                existing.unreadCount ??
+                0
+            ),
 
-        lastTimestamp:
-          new Date().toISOString()
-      };
-    } else {
-      data.records[cleanNumber].count += 1;
+        lastSeen:
+            new Date().toISOString(),
 
-      data.records[cleanNumber].name =
-        pushName ||
-        data.records[cleanNumber].name;
-
-      data.records[cleanNumber].lastTimestamp =
-        new Date().toISOString();
-    }
-
-    this.saveData(data);
-
-    return data.records[cleanNumber];
-  }
-
-  getUsageStats() {
-    const data =
-      this.loadData();
-
-    const today =
-      this.getTodayKey();
-
-    const limit =
-      data.config?.maxDailyLimit ??
-      this.maxDailyLimit;
-
-    const users =
-      Object.entries(data.records)
-        .map(([number, record]) => {
-          const isToday =
-            record.lastDate === today;
-
-          const count =
-            isToday
-              ? record.count
-              : 0;
-
-          return {
-            number,
-
-            name:
-              record.name ||
-              number,
-
-            countToday:
-              count,
-
-            limit,
-
-            remaining:
-              Math.max(
-                0,
-                limit - count
-              ),
-
-            status:
-              count >= limit
-                ? 'LIMIT_REACHED'
-                : count > 0
-                  ? 'ACTIVE'
-                  : 'IDLE',
-
-            lastTimestamp:
-              record.lastTimestamp
-          };
-        })
-        .sort(
-          (a, b) =>
-            new Date(b.lastTimestamp) -
-            new Date(a.lastTimestamp)
-        );
-
-    return {
-      today,
-
-      maxDailyLimit:
-        limit,
-
-      totalUsers:
-        users.length,
-
-      activeToday:
-        users.filter(
-          user =>
-            user.countToday > 0
-        ).length,
-
-      users
-    };
-  }
-
-  setDailyLimit(newLimit) {
-    const limit =
-      Number(newLimit);
-
-    if (
-      !Number.isFinite(limit) ||
-      limit < 1
-    ) {
-      return;
-    }
-
-    const data =
-      this.loadData();
-
-    this.maxDailyLimit =
-      limit;
-
-    data.config = {
-      ...(data.config || {}),
-      maxDailyLimit: limit
+        source:
+            group.source ||
+            existing.source ||
+            "runtime"
     };
 
-    this.saveData(data);
-  }
+    storedGroups.set(id, updated);
+
+    saveStoredGroups();
+
+    broadcast("GROUP_UPDATED", updated);
+
+    return updated;
 }
 
-const rateLimiter =
-  new RateLimiter(5);
+function getGroupList() {
+    return Array.from(
+        storedGroups.values()
+    ).sort((a, b) =>
+        String(a.name).localeCompare(
+            String(b.name)
+        )
+    );
+}
 
-/* =========================================================
-   SELECTED GROUPS
-========================================================= */
+/* ============================================================
+   WEBSOCKET
+============================================================ */
 
-function loadSelectedGroups() {
-  try {
-    if (
-      fs.existsSync(GROUPS_FILE)
-    ) {
-      const data =
-        JSON.parse(
-          fs.readFileSync(
-            GROUPS_FILE,
-            'utf8'
-          )
-        );
+const sockets = new Set();
 
-      if (
-        Array.isArray(data.groups)
-      ) {
-        return data.groups;
-      }
+function broadcast(event, data) {
+    const payload = JSON.stringify({
+        event,
+        data,
+        timestamp: new Date().toISOString()
+    });
+
+    for (const ws of sockets) {
+        try {
+            if (ws.readyState === 1) {
+                ws.send(payload);
+            }
+        } catch {}
     }
-  } catch (error) {
-    console.error(
-      'Failed loading selected groups:',
-      error
-    );
-  }
-
-  return ['ALL'];
 }
 
-function saveSelectedGroups(
-  groups
-) {
-  try {
-    fs.mkdirSync(
-      DATA_DIR,
-      { recursive: true }
-    );
-
-    fs.writeFileSync(
-      GROUPS_FILE,
-      JSON.stringify(
-        { groups },
-        null,
-        2
-      )
-    );
-  } catch (error) {
-    console.error(
-      'Failed saving selected groups:',
-      error
-    );
-  }
-}
-
-let selectedGroupIds =
-  loadSelectedGroups();
-
-/* =========================================================
-   AI SERVICE (HACKAI SDK EXCLUSIVE)
-========================================================= */
-
-class AIService {
-  constructor() {
-    this.mode = 'AUTO'; // AUTO | SHORT_HUMAN | HIGH_DETAIL
-  }
-
-  detectDesiredMode(prompt) {
-    if (!prompt) return 'SHORT_HUMAN';
-    const clean = prompt.replace(/@ai/gi, '').trim().toLowerCase();
-    const highDetailKeywords = ['detail', 'explain', 'step by step', 'guide', 'code', 'tutorial', 'compare', 'how to', 'why'];
-    return (highDetailKeywords.some(k => clean.includes(k)) || clean.length > 140) ? 'HIGH_DETAIL' : 'SHORT_HUMAN';
-  }
-
-  async generateResponse(prompt, senderName = 'Friend') {
-    const mode = this.mode === 'AUTO' ? this.detectDesiredMode(prompt) : this.mode;
-
-    const systemInstruction = mode === 'SHORT_HUMAN'
-      ? `You are a friendly, smart WhatsApp AI Assistant for ${senderName}. Keep response VERY SHORT, natural, informal, and human-like (1-3 sentences max).`
-      : `You are a helpful WhatsApp AI Assistant for ${senderName}. Provide a detailed, well-structured response using WhatsApp markdown (*bold*, bullet points •).`;
-
-    if (!HACKAI_API_KEY) {
-      return `⚠️ HackAI API Key is missing. Please set HACKAI_API_KEY in your .env file.`;
-    }
-
+function sendWS(ws, event, data) {
     try {
-      if (!hackAiSdk) {
-        throw new Error('@razinmohammedpt/hackai-sdk module is not loaded');
-      }
-
-      let aiText = '';
-
-      // Initialize HackAI SDK Client
-      const SDKClientClass = hackAiSdk.Client || hackAiSdk.default || hackAiSdk.HackAI;
-      if (typeof SDKClientClass === 'function') {
-        const clientInstance = new SDKClientClass({ apiKey: HACKAI_API_KEY });
-        if (typeof clientInstance.chat === 'function') {
-          const res = await clientInstance.chat({ system: systemInstruction, prompt });
-          aiText = res?.text || res?.content || res?.message || '';
-        } else if (typeof clientInstance.generateText === 'function') {
-          const res = await clientInstance.generateText({ system: systemInstruction, prompt });
-          aiText = res?.text || res?.content || res?.message || '';
+        if (ws.readyState === 1) {
+            ws.send(
+                JSON.stringify({
+                    event,
+                    data,
+                    timestamp: new Date().toISOString()
+                })
+            );
         }
-      } else if (typeof hackAiSdk.generateText === 'function') {
-        const res = await hackAiSdk.generateText({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
-        aiText = res?.text || res?.content || res?.message || '';
-      } else if (typeof hackAiSdk.chat === 'function') {
-        const res = await hackAiSdk.chat({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
-        aiText = res?.text || res?.content || res?.message || '';
-      }
-
-      if (!aiText && typeof hackAiSdk.default === 'function') {
-        const res = await hackAiSdk.default({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
-        aiText = typeof res === 'string' ? res : (res?.text || res?.content || '');
-      }
-
-      if (aiText && typeof aiText === 'string') {
-        return aiText.trim();
-      }
-
-      throw new Error('HackAI SDK returned empty response');
-    } catch (error) {
-      console.error('❌ HackAI Generation Error:', error);
-      return `⚠️ HackAI Generation Failed: ${error.message || 'Unknown error'}`;
-    }
-  }
+    } catch {}
 }
 
-const aiService = new AIService();
-
-/* =========================================================
-   TYPING / RESPONSE DELAY
-========================================================= */
-
-class AntiBanEngine {
-  constructor() {
-    this.minDelayMs = 2500;
-    this.maxDelayMs = 5500;
-    this.enableTyping = true;
-  }
-
-  async execute(
-    chat,
-    textLength = 40
-  ) {
-    const jitter =
-      Math.floor(
-        Math.random() *
-          (
-            this.maxDelayMs -
-            this.minDelayMs +
-            1
-          )
-      ) +
-      this.minDelayMs;
-
-    const typingTime =
-      Math.min(
-        jitter,
-        Math.max(
-          1500,
-          textLength * 35
-        )
-      );
-
-    if (
-      this.enableTyping &&
-      chat &&
-      typeof chat.sendStateTyping ===
-        'function'
-    ) {
-      try {
-        await chat.sendStateTyping();
-      } catch (error) {
-        console.warn(
-          'Typing state failed:',
-          error.message
-        );
-      }
-    }
-
-    await new Promise(
-      resolve =>
-        setTimeout(
-          resolve,
-          typingTime
-        )
-    );
-
-    if (
-      this.enableTyping &&
-      chat &&
-      typeof chat.clearState ===
-        'function'
-    ) {
-      try {
-        await chat.clearState();
-      } catch (error) {
-        console.warn(
-          'Clear typing failed:',
-          error.message
-        );
-      }
-    }
-  }
-}
-
-const antiBan =
-  new AntiBanEngine();
-
-/* =========================================================
-   WHATSAPP STATE
-========================================================= */
+/* ============================================================
+   WHATSAPP CLIENT
+============================================================ */
 
 let client = null;
 
+let agentStatus = "DISCONNECTED";
+let qrCodeUrl = "";
+let connectedPhone = "";
+
 let initializing = false;
 
-let agentStatus =
-  'DISCONNECTED';
+function setStatus(status, extra = {}) {
+    agentStatus = status;
 
-let qrCodeUrl = '';
-
-let userPhone = '';
-
-let cachedGroups = [];
-
-let lastChatCount = 0;
-
-let lastContactCount = 0;
-
-/* =========================================================
-   CHROME PATH
-========================================================= */
-
-function getChromePath() {
-  if (
-    process.env.PUPPETEER_EXECUTABLE_PATH
-  ) {
-    return process.env
-      .PUPPETEER_EXECUTABLE_PATH;
-  }
-
-  if (
-    process.platform !==
-    'win32'
-  ) {
-    return undefined;
-  }
-
-  const possiblePaths = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
-  ];
-
-  for (
-    const chromePath of possiblePaths
-  ) {
-    if (
-      fs.existsSync(chromePath)
-    ) {
-      return chromePath;
-    }
-  }
-
-  return undefined;
+    broadcast(
+        "STATUS_CHANGED",
+        {
+            status,
+            ...extra
+        }
+    );
 }
 
-/* =========================================================
-   GROUP DISCOVERY
-========================================================= */
+/* ============================================================
+   CHROME DETECTION
+============================================================ */
 
-async function fetchRealGroups(
-  options = {}
-) {
-  const {
-    maxAttempts = 20,
-    delayMs = 3000,
-    force = false
-  } = options;
+function findChrome() {
+    const candidates = [];
 
-  if (!client) {
-    addLog(
-      'WARN',
-      'Cannot fetch groups: WhatsApp client is null.'
-    );
-
-    return cachedGroups;
-  }
-
-  if (
-    agentStatus !==
-      'CONNECTED' &&
-    !force
-  ) {
-    addLog(
-      'WARN',
-      `Cannot fetch groups: status is ${agentStatus}.`
-    );
-
-    return cachedGroups;
-  }
-
-  if (client.pupPage) {
-    try {
-      await client.pupPage.waitForFunction(
-        () => window.Store && window.Store.Chat && typeof window.Store.Chat.getModelsArray === 'function',
-        { timeout: 15000 }
-      ).catch(() => {});
-    } catch (e) {}
-  }
-
-  for (
-    let attempt = 1;
-    attempt <= maxAttempts;
-    attempt++
-  ) {
-    try {
-      console.log(
-        `\n[GROUP SYNC] Attempt ${attempt}/${maxAttempts}`
-      );
-
-      let state = null;
-
-      try {
-        state =
-          await client.getState();
-      } catch (error) {
-        console.warn(
-          'getState failed:',
-          error.message
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        candidates.push(
+            process.env.PUPPETEER_EXECUTABLE_PATH
         );
-      }
+    }
 
-      console.log(
-        '[GROUP SYNC] WhatsApp state:',
-        state
-      );
-
-      if (
-        state &&
-        state !== 'CONNECTED' &&
-        !force
-      ) {
-        addLog(
-          'WARN',
-          `WhatsApp state is ${state}; waiting...`
+    if (process.platform === "win32") {
+        candidates.push(
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files\\Chromium\\Application\\chrome.exe"
         );
-      }
+    }
 
-      const chats =
-        await client.getChats();
+    if (process.platform === "linux") {
+        candidates.push(
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser"
+        );
+    }
 
-      lastChatCount =
-        chats.length;
+    for (const candidate of candidates) {
+        if (candidate && fs.existsSync(candidate)) {
+            return candidate;
+        }
+    }
 
-      console.log(
-        `[GROUP SYNC] Total chats: ${chats.length}`
-      );
+    return undefined;
+}
 
-      const groups =
-        chats.filter(chat => {
-          const serialized =
-            chat?.id?._serialized ||
-            '';
+/* ============================================================
+   PAGE DIAGNOSTICS
+============================================================ */
 
-          return (
-            chat?.isGroup === true ||
-            serialized.endsWith(
-              '@g.us'
-            )
-          );
+async function pageDiagnostics() {
+    if (!client?.pupPage) {
+        return {
+            available: false
+        };
+    }
+
+    try {
+        const page = client.pupPage;
+
+        const result = await page.evaluate(() => {
+            const w = window;
+
+            return {
+                url: location.href,
+                title: document.title,
+                readyState: document.readyState,
+
+                hasWWebJS:
+                    typeof w.WWebJS !== "undefined",
+
+                hasRequire:
+                    typeof w.require === "function",
+
+                bodyLength:
+                    document.body?.innerText?.length || 0,
+
+                roleListItems:
+                    document.querySelectorAll(
+                        '[role="listitem"]'
+                    ).length,
+
+                debugVersion:
+                    w.Debug?.VERSION ||
+                    w.Debug?.VERSION_BASE ||
+                    null
+            };
         });
 
-      console.log(
-        `[GROUP SYNC] Total groups: ${groups.length}`
-      );
+        return {
+            available: true,
+            ...result
+        };
 
-      /*
-       * IMPORTANT DEBUG OUTPUT
-       */
+    } catch (err) {
+        return {
+            available: false,
+            error: errorString(err)
+        };
+    }
+}
 
-      if (chats.length > 0) {
-        console.log(
-          '[GROUP SYNC] Sample chats:'
+/* ============================================================
+   SAFE PAGE EVALUATION
+============================================================ */
+
+async function safePageEvaluate(fn, ...args) {
+    if (!client?.pupPage) {
+        throw new Error(
+            "WhatsApp page is not available"
+        );
+    }
+
+    return client.pupPage.evaluate(
+        fn,
+        ...args
+    );
+}
+
+/* ============================================================
+   DIRECT GROUP DISCOVERY
+============================================================ */
+
+/*
+   This is the important replacement for client.getChats().
+
+   We first try the WhatsApp internal collections directly.
+
+   This is deliberately defensive because WhatsApp changes
+   internal module names over time.
+*/
+
+async function discoverGroupsFromPage() {
+    if (!client?.pupPage) {
+        return [];
+    }
+
+    try {
+        const result = await safePageEvaluate(() => {
+            const output = [];
+
+            function add(value) {
+                if (!value) return;
+
+                let item = value;
+
+                try {
+                    if (
+                        typeof item === "object" &&
+                        item._models
+                    ) {
+                        item = item._models;
+                    }
+
+                    if (
+                        typeof item === "object" &&
+                        typeof item.getModelsArray === "function"
+                    ) {
+                        item =
+                            item.getModelsArray();
+                    }
+                } catch {}
+                
+                if (Array.isArray(item)) {
+                    for (const x of item) {
+                        add(x);
+                    }
+
+                    return;
+                }
+
+                if (
+                    typeof item !== "object" ||
+                    !item
+                ) {
+                    return;
+                }
+
+                const id =
+                    item.id?._serialized ||
+                    item.id?.user && item.id?.server
+                        ? `${item.id.user}@${item.id.server}`
+                        : item.id;
+
+                const serialized =
+                    typeof id === "string"
+                        ? id
+                        : null;
+
+                if (
+                    serialized &&
+                    serialized.endsWith("@g.us")
+                ) {
+                    output.push({
+                        id: serialized,
+
+                        name:
+                            item.formattedTitle ||
+                            item.name ||
+                            item.subject ||
+                            "Unnamed Group",
+
+                        participantCount:
+                            Array.isArray(
+                                item.participants
+                            )
+                                ? item.participants.length
+                                : 0
+                    });
+                }
+            }
+
+            /*
+              Method A:
+              WWebJS exists.
+            */
+
+            try {
+                if (
+                    typeof window.WWebJS !== "undefined"
+                ) {
+                    /*
+                      Don't call WWebJS.getChats().
+                      That is exactly the function crashing
+                      on the user's installation.
+                    */
+
+                    const candidates = [
+                        window.WWebJS.getChatModel,
+                        window.WWebJS.getChats
+                    ];
+
+                    // getChats intentionally NOT called.
+                    void candidates;
+                }
+            } catch {}
+
+            /*
+              Method B:
+              WhatsApp module collections.
+            */
+
+            try {
+                if (
+                    typeof window.require === "function"
+                ) {
+                    const collections =
+                        window.require(
+                            "WAWebCollections"
+                        );
+
+                    if (collections) {
+
+                        /*
+                          Current whatsapp-web.js itself
+                          uses WAWebCollections.Chat.
+                        */
+
+                        const chatStore =
+                            collections.Chat;
+
+                        if (chatStore) {
+                            try {
+                                if (
+                                    typeof chatStore.getModelsArray ===
+                                    "function"
+                                ) {
+                                    add(
+                                        chatStore.getModelsArray()
+                                    );
+                                }
+                            } catch {}
+
+                            try {
+                                if (
+                                    Array.isArray(
+                                        chatStore.models
+                                    )
+                                ) {
+                                    add(
+                                        chatStore.models
+                                    );
+                                }
+                            } catch {}
+
+                            try {
+                                if (
+                                    chatStore._models
+                                ) {
+                                    add(
+                                        chatStore._models
+                                    );
+                                }
+                            } catch {}
+                        }
+                    }
+                }
+            } catch {}
+
+            /*
+              Remove duplicates.
+            */
+
+            const map = new Map();
+
+            for (const item of output) {
+                if (!item.id) continue;
+
+                if (!map.has(item.id)) {
+                    map.set(
+                        item.id,
+                        item
+                    );
+                }
+            }
+
+            return Array.from(
+                map.values()
+            );
+        });
+
+        return Array.isArray(result)
+            ? result
+            : [];
+
+    } catch (err) {
+        log(
+            "WARN",
+            "Direct page group discovery failed",
+            {
+                error: errorString(err)
+            }
         );
 
-        for (
-          const chat of chats.slice(
-            0,
-            15
-          )
-        ) {
-          console.log({
-            id:
-              chat?.id?._serialized,
+        return [];
+    }
+}
 
-            name:
-              chat?.name,
+/* ============================================================
+   GROUP SYNC
+============================================================ */
 
-            type:
-              chat?.type,
+let groupSyncRunning = false;
 
-            isGroup:
-              chat?.isGroup
-          });
-        }
-      }
+async function syncGroups() {
 
-      /*
-       * If WhatsApp has populated chats,
-       * we can confidently return groups.
-       */
-
-      if (
-        chats.length > 0
-      ) {
-        cachedGroups =
-          groups.map(group => ({
-            id:
-              group.id._serialized,
-
-            name:
-              group.name ||
-              'Unnamed Group',
-
-            unreadCount:
-              group.unreadCount ||
-              0,
-
-            participantCount:
-              Array.isArray(
-                group.participants
-              )
-                ? group.participants.length
-                : 0,
-
-            timestamp:
-              group.timestamp ||
-              null
-          }));
-
-        addLog(
-          'INFO',
-          `Discovered ${cachedGroups.length} WhatsApp group(s).`,
-          {
-            totalChats:
-              chats.length,
-
-            totalGroups:
-              cachedGroups.length
-          }
+    if (groupSyncRunning) {
+        log(
+            "INFO",
+            "Group synchronization already running"
         );
 
-        broadcastWS(
-          'GROUPS_LIST',
-          {
-            groups:
-              cachedGroups
-          }
-        );
-
-        return cachedGroups;
-      }
-
-      /*
-       * No chats yet.
-       */
-
-      addLog(
-        'WARN',
-        `WhatsApp chat store is still empty (${attempt}/${maxAttempts}). Waiting ${delayMs}ms...`,
-        {
-          state,
-          chats:
-            chats.length
-        }
-      );
-    } catch (error) {
-      console.error(
-        '[GROUP SYNC] ERROR:',
-        error
-      );
-
-      addLog(
-        'ERROR',
-        `getChats() failed on attempt ${attempt}/${maxAttempts}: ${error.message}`,
-        {
-          stack:
-            error.stack
-        }
-      );
+        return getGroupList();
     }
 
     if (
-      attempt <
-      maxAttempts
+        !client ||
+        agentStatus !== "CONNECTED"
     ) {
-      await new Promise(
-        resolve =>
-          setTimeout(
-            resolve,
-            delayMs
-          )
-      );
+        log(
+            "WARN",
+            "Cannot synchronize groups: WhatsApp not connected"
+        );
+
+        return getGroupList();
     }
-  }
 
-  /*
-   * FINAL DIAGNOSTICS
-   */
+    groupSyncRunning = true;
 
-  let finalState =
-    'UNKNOWN';
+    try {
 
-  try {
-    finalState =
-      await client.getState();
-  } catch {}
+        log(
+            "INFO",
+            "Starting safe group synchronization..."
+        );
 
-  let contacts = [];
+        /*
+          NEVER call client.getChats() here.
+        */
 
-  try {
-    contacts =
-      await client.getContacts();
-  } catch (error) {
-    console.error(
-      'getContacts failed:',
-      error
-    );
-  }
+        const groups =
+            await discoverGroupsFromPage();
 
-  lastContactCount =
-    contacts.length;
+        log(
+            "INFO",
+            `Direct WhatsApp group discovery returned ${groups.length} group(s)`
+        );
 
-  console.error(
-    '\n========================================'
-  );
+        for (const group of groups) {
+            upsertGroup({
+                ...group,
+                source: "whatsapp-page"
+            });
+        }
 
-  console.error(
-    '❌ WHATSAPP CHAT SYNC FAILED'
-  );
+        const finalGroups =
+            getGroupList();
 
-  console.error(
-    'State:',
-    finalState
-  );
+        broadcast(
+            "GROUPS_LIST",
+            {
+                groups: finalGroups,
+                count: finalGroups.length
+            }
+        );
 
-  console.error(
-    'Chats:',
-    lastChatCount
-  );
+        log(
+            "INFO",
+            `Group database now contains ${finalGroups.length} group(s)`
+        );
 
-  console.error(
-    'Contacts:',
-    lastContactCount
-  );
+        return finalGroups;
 
-  console.error(
-    'Groups:',
-    cachedGroups.length
-  );
+    } catch (err) {
 
-  console.error(
-    'Account:',
-    client?.info?.wid?._serialized
-  );
+        log(
+            "ERROR",
+            "Safe group synchronization failed",
+            {
+                error: errorString(err)
+            }
+        );
 
-  console.error(
-    '========================================\n'
-  );
+        return getGroupList();
 
-  addLog(
-    'ERROR',
-    'WhatsApp chat list never populated.',
-    {
-      state:
-        finalState,
-
-      chats:
-        lastChatCount,
-
-      contacts:
-        lastContactCount,
-
-      groups:
-        cachedGroups.length
+    } finally {
+        groupSyncRunning = false;
     }
-  );
-
-  broadcastWS(
-    'GROUPS_LIST',
-    {
-      groups:
-        cachedGroups
-    }
-  );
-
-  return cachedGroups;
 }
 
-/* =========================================================
-   WHATSAPP DEBUG
-========================================================= */
+/* ============================================================
+   FIND GROUP
+============================================================ */
 
-async function printWhatsAppDiagnostics() {
-  console.log(
-    '\n========== WHATSAPP DIAGNOSTICS =========='
-  );
+async function findGroup(groupId) {
 
-  if (!client) {
-    console.log(
-      'Client: NULL'
-    );
+    const normalized =
+        normalizeId(groupId);
 
-    return;
-  }
+    if (!normalized) {
+        throw new Error(
+            "Invalid group ID"
+        );
+    }
 
-  try {
-    console.log(
-      'State:',
-      await client.getState()
-    );
-  } catch (error) {
-    console.log(
-      'State: ERROR',
-      error.message
-    );
-  }
+    if (!isGroupId(normalized)) {
+        throw new Error(
+            "The supplied ID is not a WhatsApp group ID"
+        );
+    }
 
-  console.log(
-    'Status:',
-    agentStatus
-  );
+    /*
+      Don't use client.getChatById().
 
-  console.log(
-    'User:',
-    client.info?.wid?._serialized ||
-      'unknown'
-  );
+      Your installation has the same class of issue
+      affecting getChatById().
+    */
 
-  console.log(
-    'Push name:',
-    client.info?.pushname ||
-      'unknown'
-  );
-
-  try {
-    const chats =
-      await client.getChats();
-
-    console.log(
-      'Chats:',
-      chats.length
-    );
-  } catch (error) {
-    console.log(
-      'Chats: ERROR',
-      error.message
-    );
-  }
-
-  try {
-    const contacts =
-      await client.getContacts();
-
-    console.log(
-      'Contacts:',
-      contacts.length
-    );
-  } catch (error) {
-    console.log(
-      'Contacts: ERROR',
-      error.message
-    );
-  }
-
-  console.log(
-    'Cached groups:',
-    cachedGroups.length
-  );
-
-  console.log(
-    'Auth directory:',
-    AUTH_DIR
-  );
-
-  console.log(
-    '===========================================\n'
-  );
+    return normalized;
 }
 
-/* =========================================================
-   INITIALIZE WHATSAPP
-========================================================= */
+/* ============================================================
+   TYPING
+============================================================ */
+
+async function showTyping(groupId, duration) {
+
+    if (!settings.typingEnabled) {
+        return;
+    }
+
+    if (!client?.pupPage) {
+        return;
+    }
+
+    try {
+
+        /*
+          Prefer the documented Chat API if we can
+          obtain a Chat object.
+
+          But because getChatById() may be affected by
+          the current WhatsApp Web regression, we use
+          the underlying WWebJS chat-state function
+          directly when available.
+        */
+
+        await safePageEvaluate(
+            async (chatId) => {
+
+                if (
+                    window.WWebJS &&
+                    typeof window.WWebJS.sendChatstate ===
+                    "function"
+                ) {
+                    await window.WWebJS.sendChatstate(
+                        "typing",
+                        chatId
+                    );
+
+                    return true;
+                }
+
+                return false;
+            },
+            groupId
+        );
+
+    } catch (err) {
+
+        log(
+            "WARN",
+            "Typing state failed",
+            {
+                groupId,
+                error: errorString(err)
+            }
+        );
+    }
+
+    await sleep(duration);
+}
+
+/* ============================================================
+   CLEAR TYPING
+============================================================ */
+
+async function clearTyping(groupId) {
+
+    try {
+
+        await safePageEvaluate(
+            async (chatId) => {
+
+                if (
+                    window.WWebJS &&
+                    typeof window.WWebJS.sendChatstate ===
+                    "function"
+                ) {
+                    await window.WWebJS.sendChatstate(
+                        "paused",
+                        chatId
+                    );
+
+                    return true;
+                }
+
+                return false;
+            },
+            groupId
+        );
+
+    } catch {}
+}
+
+/* ============================================================
+   SEND MESSAGE
+============================================================ */
+
+async function sendGroupMessage(
+    groupId,
+    text,
+    options = {}
+) {
+
+    if (
+        !client ||
+        agentStatus !== "CONNECTED"
+    ) {
+        throw new Error(
+            "WhatsApp is not connected"
+        );
+    }
+
+    if (!text?.trim()) {
+        throw new Error(
+            "Message cannot be empty"
+        );
+    }
+
+    const id =
+        await findGroup(groupId);
+
+    const min =
+        Number(
+            options.minTypingMs ??
+            settings.minTypingMs
+        );
+
+    const max =
+        Number(
+            options.maxTypingMs ??
+            settings.maxTypingMs
+        );
+
+    const typingMs =
+        Math.max(
+            0,
+            Math.floor(
+                min +
+                Math.random() *
+                Math.max(
+                    0,
+                    max - min
+                )
+            )
+        );
+
+    log(
+        "INFO",
+        `Preparing message for ${id}`,
+        {
+            typingMs,
+            length: text.length
+        }
+    );
+
+    try {
+
+        await showTyping(
+            id,
+            typingMs
+        );
+
+        await clearTyping(id);
+
+        /*
+          whatsapp-web.js sendMessage accepts a chat ID.
+          This avoids first calling getChatById().
+        */
+
+        const result =
+            await client.sendMessage(
+                id,
+                text
+            );
+
+        log(
+            "INFO",
+            `Message sent to ${id}`
+        );
+
+        broadcast(
+            "MESSAGE_SENT",
+            {
+                groupId: id,
+                message: text
+            }
+        );
+
+        return result;
+
+    } catch (err) {
+
+        await clearTyping(id);
+
+        log(
+            "ERROR",
+            "Failed sending group message",
+            {
+                groupId: id,
+                error: errorString(err)
+            }
+        );
+
+        throw err;
+    }
+}
+
+/* ============================================================
+   MESSAGE CACHE
+============================================================ */
+
+const messageCache = new Map();
+
+function cacheMessage(msg) {
+
+    const id =
+        msg?.id?._serialized ||
+        `${msg?.timestamp || Date.now()}-${Math.random()}`;
+
+    const item = {
+        id,
+
+        from:
+            msg?.from || null,
+
+        author:
+            msg?.author || null,
+
+        body:
+            msg?.body || "",
+
+        timestamp:
+            msg?.timestamp || Date.now(),
+
+        fromMe:
+            Boolean(msg?.fromMe),
+
+        type:
+            msg?.type || "unknown"
+    };
+
+    messageCache.set(
+        id,
+        item
+    );
+
+    /*
+      Keep only latest 1000 messages.
+    */
+
+    if (
+        messageCache.size > 1000
+    ) {
+
+        const first =
+            messageCache.keys().next().value;
+
+        messageCache.delete(first);
+    }
+
+    return item;
+}
+
+/* ============================================================
+   MESSAGE HANDLER
+============================================================ */
+
+async function handleMessage(msg) {
+
+    try {
+
+        const from =
+            msg?.from || null;
+
+        /*
+          Group messages have @g.us IDs.
+        */
+
+        if (
+            !isGroupId(from)
+        ) {
+            return;
+        }
+
+        const body =
+            String(msg?.body || "");
+
+        /*
+          Cache immediately.
+
+          We do NOT call msg.getChat().
+        */
+
+        const cached =
+            cacheMessage(msg);
+
+        /*
+          Discover the group directly from
+          message metadata.
+        */
+
+        let groupName =
+            "WhatsApp Group";
+
+        /*
+          Sometimes _data contains chat information.
+        */
+
+        try {
+
+            groupName =
+                msg?._data?.chat?.name ||
+                msg?._data?.chat?.formattedTitle ||
+                msg?._data?.chat?.subject ||
+                groupName;
+
+        } catch {}
+
+        const group =
+            upsertGroup({
+                id: from,
+                name: groupName,
+                source: "message"
+            });
+
+        broadcast(
+            "GROUP_MESSAGE",
+            {
+                group,
+                message: cached
+            }
+        );
+
+        log(
+            "INFO",
+            `Group message received: ${groupName}`,
+            {
+                groupId: from,
+                body: body.slice(0, 200)
+            }
+        );
+
+        /*
+          Optional AI trigger.
+        */
+
+        if (
+            !/@(?:ai|em)\b/i.test(body)
+        ) {
+            return;
+        }
+
+        /*
+          Respect selected groups.
+        */
+
+        const selected =
+            settings.selectedGroups || ["ALL"];
+
+        if (
+            !selected.includes("ALL") &&
+            !selected.includes(from)
+        ) {
+            log(
+                "INFO",
+                "AI trigger ignored because group is not selected",
+                {
+                    groupId: from
+                }
+            );
+
+            return;
+        }
+
+        log(
+            "INFO",
+            "AI trigger detected",
+            {
+                groupId: from,
+                message: body
+            }
+        );
+
+        /*
+          Placeholder AI response.
+
+          Replace generateAIResponse() with your
+          HackAI implementation.
+        */
+
+        const response =
+            await generateAIResponse(
+                body
+            );
+
+        if (!response) {
+            return;
+        }
+
+        await sendGroupMessage(
+            from,
+            response
+        );
+
+    } catch (err) {
+
+        log(
+            "ERROR",
+            "Message handler failed",
+            {
+                error: errorString(err)
+            }
+        );
+    }
+}
+
+/* ============================================================
+   AI
+============================================================ */
+
+async function generateAIResponse(prompt) {
+
+    const cleaned =
+        String(prompt)
+            .replace(/@(?:ai|em)\b/gi, "")
+            .trim();
+
+    if (!cleaned) {
+        return "Hey! 👋";
+    }
+
+    /*
+      If HackAI SDK is installed, you can plug your
+      existing SDK here.
+
+      This intentionally does not pretend to know the
+      exact API of your private package.
+    */
+
+    if (
+        process.env.HACKAI_API_KEY
+    ) {
+
+        try {
+
+            /*
+              Keep your existing SDK/API implementation
+              here if needed.
+            */
+
+            const response =
+                await fetch(
+                    "https://api.openai.com/v1/chat/completions",
+                    {
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+
+                            Authorization:
+                                `Bearer ${process.env.HACKAI_API_KEY}`
+                        },
+
+                        body: JSON.stringify({
+                            model:
+                                process.env.AI_MODEL ||
+                                "gpt-4o-mini",
+
+                            messages: [
+                                {
+                                    role: "system",
+                                    content:
+                                        "You are a helpful WhatsApp group assistant. Be concise and natural."
+                                },
+                                {
+                                    role: "user",
+                                    content:
+                                        cleaned
+                                }
+                            ],
+
+                            max_tokens: 300
+                        })
+                    }
+                );
+
+            if (response.ok) {
+
+                const data =
+                    await response.json();
+
+                const text =
+                    data?.choices?.[0]
+                        ?.message
+                        ?.content
+                        ?.trim();
+
+                if (text) {
+                    return text;
+                }
+            }
+
+        } catch (err) {
+
+            log(
+                "WARN",
+                "AI request failed",
+                {
+                    error:
+                        errorString(err)
+                }
+            );
+        }
+    }
+
+    return (
+        `🤖 I received: "${cleaned.slice(0, 150)}"`
+    );
+}
+
+/* ============================================================
+   CONNECTION DIAGNOSTICS
+============================================================ */
+
+async function diagnostics() {
+
+    console.log(
+        "\n========== WHATSAPP DIAGNOSTICS =========="
+    );
+
+    console.log(
+        "Status:",
+        agentStatus
+    );
+
+    console.log(
+        "User:",
+        client?.info?.wid?._serialized ||
+        "unknown"
+    );
+
+    console.log(
+        "Push name:",
+        client?.info?.pushname ||
+        "unknown"
+    );
+
+    console.log(
+        "Cached groups:",
+        storedGroups.size
+    );
+
+    console.log(
+        "Auth:",
+        AUTH_DIR
+    );
+
+    const page =
+        await pageDiagnostics();
+
+    console.log(
+        "Page:",
+        page
+    );
+
+    console.log(
+        "===========================================\n"
+    );
+
+    broadcast(
+        "DIAGNOSTICS",
+        {
+            status: agentStatus,
+            user:
+                client?.info?.wid?._serialized ||
+                null,
+            pushName:
+                client?.info?.pushname ||
+                null,
+            groups:
+                storedGroups.size,
+            page
+        }
+    );
+
+    return page;
+}
+
+/* ============================================================
+   WHATSAPP INITIALIZATION
+============================================================ */
 
 async function initWhatsApp() {
-  if (
-    client ||
-    initializing
-  ) {
-    addLog(
-      'WARN',
-      'WhatsApp initialization already running or client exists.'
-    );
 
-    return;
-  }
-
-  initializing = true;
-
-  agentStatus =
-    'INITIALIZING';
-
-  broadcastWS(
-    'STATUS_CHANGED',
-    {
-      status:
-        agentStatus
-    }
-  );
-
-  addLog(
-    'INFO',
-    'Initializing WhatsApp Web client...'
-  );
-
-  const chromePath =
-    getChromePath();
-
-  console.log(
-    'Chrome path:',
-    chromePath ||
-      'Puppeteer default'
-  );
-
-  console.log(
-    'WhatsApp auth directory:',
-    AUTH_DIR
-  );
-
-  try {
-    client =
-      new Client({
-        authStrategy:
-          new LocalAuth({
-            dataPath:
-              AUTH_DIR,
-
-            clientId:
-              'main'
-          }),
-
-        puppeteer: {
-          headless:
-            process.env.WHATSAPP_HEADLESS !==
-              'false',
-
-          executablePath:
-            chromePath,
-
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--no-first-run',
-            '--no-default-browser-check'
-          ]
-        }
-      });
-
-    /* -----------------------------------------
-       QR
-    ----------------------------------------- */
-
-    client.on(
-      'qr',
-      async qrRaw => {
-        console.log(
-          '📱 New WhatsApp QR generated'
+    if (
+        initializing ||
+        client
+    ) {
+        log(
+            "INFO",
+            "WhatsApp client already initialized"
         );
 
-        agentStatus =
-          'QR_READY';
+        return;
+    }
+
+    initializing = true;
+
+    setStatus(
+        "INITIALIZING"
+    );
+
+    const chromePath =
+        findChrome();
+
+    log(
+        "INFO",
+        "Initializing WhatsApp Web client...",
+        {
+            chromePath,
+            authDir: AUTH_DIR
+        }
+    );
+
+    try {
+
+        client =
+            new Client({
+
+                authStrategy:
+                    new LocalAuth({
+                        dataPath:
+                            AUTH_DIR
+                    }),
+
+                puppeteer: {
+
+                    headless:
+                        true,
+
+                    executablePath:
+                        chromePath,
+
+                    args: [
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-features=Translate,BackForwardCache",
+                        "--no-first-run",
+                        "--no-default-browser-check"
+                    ]
+                }
+            });
+
+        /* -----------------------------------------
+           QR
+        ----------------------------------------- */
+
+        client.on(
+            "qr",
+            async qrRaw => {
+
+                try {
+
+                    qrCodeUrl =
+                        await qrcode.toDataURL(
+                            qrRaw
+                        );
+
+                    setStatus(
+                        "QR_READY"
+                    );
+
+                    broadcast(
+                        "QR_CODE",
+                        {
+                            qr:
+                                qrCodeUrl
+                        }
+                    );
+
+                    log(
+                        "INFO",
+                        "New WhatsApp QR generated"
+                    );
+
+                } catch (err) {
+
+                    log(
+                        "ERROR",
+                        "QR generation failed",
+                        {
+                            error:
+                                errorString(err)
+                        }
+                    );
+                }
+            }
+        );
+
+        /* -----------------------------------------
+           AUTHENTICATED
+        ----------------------------------------- */
+
+        client.on(
+            "authenticated",
+            () => {
+
+                qrCodeUrl = "";
+
+                log(
+                    "INFO",
+                    "WhatsApp authenticated"
+                );
+
+                broadcast(
+                    "AUTHENTICATED",
+                    {}
+                );
+            }
+        );
+
+        /* -----------------------------------------
+           AUTH FAILURE
+        ----------------------------------------- */
+
+        client.on(
+            "auth_failure",
+            reason => {
+
+                setStatus(
+                    "ERROR",
+                    {
+                        error:
+                            String(reason)
+                    }
+                );
+
+                log(
+                    "ERROR",
+                    "WhatsApp authentication failure",
+                    {
+                        reason:
+                            String(reason)
+                    }
+                );
+            }
+        );
+
+        /* -----------------------------------------
+           READY
+        ----------------------------------------- */
+
+        client.on(
+            "ready",
+            async () => {
+
+                setStatus(
+                    "CONNECTED"
+                );
+
+                qrCodeUrl = "";
+
+                connectedPhone =
+                    client?.info?.wid?.user ||
+                    "";
+
+                log(
+                    "INFO",
+                    "WhatsApp Web is READY",
+                    {
+                        phone:
+                            connectedPhone
+                    }
+                );
+
+                broadcast(
+                    "READY",
+                    {
+                        phone:
+                            connectedPhone
+                    }
+                );
+
+                /*
+                  Give WhatsApp Web a moment to finish
+                  page initialization.
+
+                  IMPORTANT:
+                  We do NOT call client.getChats().
+                */
+
+                await sleep(5000);
+
+                await diagnostics();
+
+                /*
+                  Try direct store discovery.
+                */
+
+                await syncGroups();
+
+                /*
+                  Continue periodically.
+
+                  60 seconds is enough; there is no reason
+                  to hammer WhatsApp.
+                */
+
+                startGroupSyncLoop();
+            }
+        );
+
+        /* -----------------------------------------
+           MESSAGE
+        ----------------------------------------- */
+
+        client.on(
+            "message",
+            handleMessage
+        );
+
+        /*
+          message_create also sees our own messages.
+        */
+
+        client.on(
+            "message_create",
+            msg => {
+
+                if (
+                    msg?.fromMe
+                ) {
+                    log(
+                        "INFO",
+                        "Outgoing message observed",
+                        {
+                            chatId:
+                                msg?.from
+                        }
+                    );
+                }
+            }
+        );
+
+        /* -----------------------------------------
+           DISCONNECTED
+        ----------------------------------------- */
+
+        client.on(
+            "disconnected",
+            reason => {
+
+                log(
+                    "ERROR",
+                    "WhatsApp disconnected",
+                    {
+                        reason:
+                            String(reason)
+                    }
+                );
+
+                setStatus(
+                    "DISCONNECTED",
+                    {
+                        reason:
+                            String(reason)
+                    }
+                );
+
+                connectedPhone = "";
+
+                stopGroupSyncLoop();
+
+                client = null;
+                initializing = false;
+            }
+        );
+
+        /* -----------------------------------------
+           STATE CHANGE
+        ----------------------------------------- */
+
+        client.on(
+            "change_state",
+            state => {
+
+                log(
+                    "INFO",
+                    `WhatsApp state changed: ${state}`
+                );
+
+                broadcast(
+                    "WHATSAPP_STATE",
+                    {
+                        state
+                    }
+                );
+            }
+        );
+
+        /* -----------------------------------------
+           INITIALIZE
+        ----------------------------------------- */
+
+        await client.initialize();
+
+    } catch (err) {
+
+        log(
+            "ERROR",
+            "WhatsApp initialization failed",
+            {
+                error:
+                    errorString(err)
+            }
+        );
+
+        setStatus(
+            "ERROR",
+            {
+                error:
+                    errorString(err)
+            }
+        );
 
         try {
-          qrCodeUrl =
-            await qrcode.toDataURL(
-              qrRaw
-            );
-
-          broadcastWS(
-            'QR_CODE',
-            {
-              qr:
-                qrCodeUrl
-            }
-          );
-        } catch (error) {
-          console.error(
-            'QR generation failed:',
-            error
-          );
-        }
-
-        broadcastWS(
-          'STATUS_CHANGED',
-          {
-            status:
-              agentStatus
-          }
-        );
-
-        addLog(
-          'INFO',
-          'WhatsApp QR code generated. Scan it from your phone.'
-        );
-      }
-    );
-
-    /* -----------------------------------------
-       AUTHENTICATED
-    ----------------------------------------- */
-
-    client.on(
-      'authenticated',
-      () => {
-        console.log(
-          '✅ WhatsApp authenticated'
-        );
-
-        agentStatus =
-          'AUTHENTICATED';
-
-        qrCodeUrl = '';
-
-        broadcastWS(
-          'STATUS_CHANGED',
-          {
-            status:
-              agentStatus
-          }
-        );
-
-        addLog(
-          'INFO',
-          'WhatsApp Web authenticated successfully.'
-        );
-      }
-    );
-
-    /* -----------------------------------------
-       AUTH FAILURE
-    ----------------------------------------- */
-
-    client.on(
-      'auth_failure',
-      error => {
-        console.error(
-          '❌ WhatsApp authentication failure:',
-          error
-        );
-
-        agentStatus =
-          'ERROR';
-
-        broadcastWS(
-          'STATUS_CHANGED',
-          {
-            status:
-              agentStatus,
-
-            error:
-              error?.message ||
-              'Authentication failed'
-          }
-        );
-
-        addLog(
-          'ERROR',
-          `WhatsApp authentication failure: ${
-            error?.message ||
-            'Unknown'
-          }`
-        );
-      }
-    );
-
-    /* -----------------------------------------
-       STATE CHANGES
-    ----------------------------------------- */
-
-    client.on(
-      'change_state',
-      state => {
-        console.log(
-          '🔄 WhatsApp state:',
-          state
-        );
-
-        addLog(
-          'INFO',
-          `WhatsApp state changed: ${state}`,
-          {
-            state
-          }
-        );
-      }
-    );
-
-    /* -----------------------------------------
-       READY
-    ----------------------------------------- */
-
-    client.on(
-      'ready',
-      async () => {
-        console.log(
-          '\n================================'
-        );
-
-        console.log(
-          '✅ WHATSAPP WEB READY'
-        );
-
-        console.log(
-          '================================'
-        );
-
-        agentStatus =
-          'CONNECTED';
-
-        userPhone =
-          client.info?.wid?.user ||
-          '';
-
-        qrCodeUrl = '';
-
-        initializing = false;
-
-        broadcastWS(
-          'STATUS_CHANGED',
-          {
-            status:
-              agentStatus,
-
-            phone:
-              userPhone
-          }
-        );
-
-        addLog(
-          'INFO',
-          `WhatsApp AI Agent connected: +${userPhone}`
-        );
-
-        /*
-         * Print diagnostics first.
-         */
-
-        await printWhatsAppDiagnostics();
-
-        /*
-         * IMPORTANT:
-         * Don't assume chats exist 2 seconds later.
-         * Wait until the chat store is populated.
-         */
-
-        await fetchRealGroups({
-          maxAttempts: 20,
-          delayMs: 3000
-        });
-      }
-    );
-
-    /* -----------------------------------------
-       DISCONNECTED
-    ----------------------------------------- */
-
-    client.on(
-      'disconnected',
-      reason => {
-        console.error(
-          '❌ WhatsApp disconnected:',
-          reason
-        );
-
-        agentStatus =
-          'DISCONNECTED';
-
-        qrCodeUrl = '';
-
-        userPhone = '';
-
-        cachedGroups = [];
-
-        broadcastWS(
-          'STATUS_CHANGED',
-          {
-            status:
-              agentStatus,
-
-            reason
-          }
-        );
-
-        addLog(
-          'ERROR',
-          `WhatsApp disconnected: ${reason}`
-        );
+            await client?.destroy();
+        } catch {}
 
         client = null;
+
+    } finally {
+
         initializing = false;
-      }
-    );
-
-    /* -----------------------------------------
-       MESSAGE HANDLER
-    ----------------------------------------- */
-
-    const handleIncomingMsg =
-      async msg => {
-        try {
-          const body =
-            msg.body || '';
-
-          if (!body) {
-            return;
-          }
-
-          /*
-           * Trigger:
-           * @AI
-           * @Ai
-           * @aI
-           * @ai
-           */
-
-          const isTriggered =
-            /@ai\b/i.test(
-              body
-            );
-
-          if (!isTriggered) {
-            return;
-          }
-
-          const chat =
-            await msg
-              .getChat()
-              .catch(
-                () => null
-              );
-
-          if (!chat) {
-            return;
-          }
-
-          /*
-           * Group selection.
-           */
-
-          if (
-            chat.isGroup
-          ) {
-            const isAll =
-              selectedGroupIds.includes(
-                'ALL'
-              );
-
-            const isSelected =
-              selectedGroupIds.includes(
-                chat.id._serialized
-              );
-
-            if (
-              !isAll &&
-              !isSelected
-            ) {
-              addLog(
-                'INFO',
-                `Ignoring message from unselected group: ${chat.name}`
-              );
-
-              return;
-            }
-          }
-
-          const senderNumber =
-            msg.author ||
-            msg.from;
-
-          const cleanNumber =
-            rateLimiter.cleanPhoneNumber(
-              senderNumber
-            );
-
-          const contact =
-            await msg
-              .getContact()
-              .catch(
-                () => ({
-                  pushname:
-                    cleanNumber
-                })
-              );
-
-          const pushName =
-            contact.pushname ||
-            contact.name ||
-            cleanNumber;
-
-          addLog(
-            'TRIGGER',
-            `AI trigger from ${pushName}`,
-            {
-              message:
-                body,
-
-              sender:
-                cleanNumber,
-
-              chat:
-                chat.name,
-
-              chatId:
-                chat.id?._serialized
-            }
-          );
-
-          /*
-           * Rate limit.
-           */
-
-          const access =
-            rateLimiter.canAccess(
-              senderNumber
-            );
-
-          if (!access.allowed) {
-            await antiBan.execute(
-              chat,
-              50
-            );
-
-            await msg.reply(
-              `⚠️ *Daily Limit Reached*\n\nYou have used ${access.count}/${access.limit} AI responses today.`
-            );
-
-            broadcastWS(
-              'USAGE_UPDATED',
-              rateLimiter.getUsageStats()
-            );
-
-            return;
-          }
-
-          /*
-           * Typing.
-           */
-
-          addLog(
-            'INFO',
-            `Typing simulation for ${chat.name}`
-          );
-
-          await antiBan.execute(
-            chat,
-            body.length
-          );
-
-          /*
-           * AI.
-           */
-
-          addLog(
-            'INFO',
-            'Generating AI response...'
-          );
-
-          const response =
-            await aiService.generateResponse(
-              body,
-              pushName
-            );
-
-          /*
-           * Record usage.
-           */
-
-          const record =
-            rateLimiter.recordAccess(
-              senderNumber,
-              pushName
-            );
-
-          /*
-           * Send.
-           */
-
-          await msg.reply(
-            response
-          );
-
-          addLog(
-            'AI_REPLY',
-            `AI response sent to ${pushName} (${record.count}/5 today)`,
-            {
-              chat:
-                chat.name,
-
-              reply:
-                response
-            }
-          );
-
-          broadcastWS(
-            'USAGE_UPDATED',
-            rateLimiter.getUsageStats()
-          );
-        } catch (error) {
-          console.error(
-            'Message handler error:',
-            error
-          );
-
-          addLog(
-            'ERROR',
-            `Message handler failed: ${error.message}`,
-            {
-              stack:
-                error.stack
-            }
-          );
-        }
-      };
-
-    client.on(
-      'message',
-      handleIncomingMsg
-    );
-
-    /*
-     * message_create is useful for messages
-     * created by this WhatsApp account.
-     */
-
-    client.on(
-      'message_create',
-      async msg => {
-        if (
-          msg.fromMe
-        ) {
-          await handleIncomingMsg(
-            msg
-          );
-        }
-      }
-    );
-
-    /* -----------------------------------------
-       INITIALIZE
-    ----------------------------------------- */
-
-    await client.initialize();
-  } catch (error) {
-    console.error(
-      '❌ WhatsApp initialization failed:',
-      error
-    );
-
-    addLog(
-      'ERROR',
-      `WhatsApp initialization failed: ${error.message}`,
-      {
-        stack:
-          error.stack
-      }
-    );
-
-    agentStatus =
-      'ERROR';
-
-    client = null;
-    initializing = false;
-
-    broadcastWS(
-      'STATUS_CHANGED',
-      {
-        status:
-          agentStatus,
-
-        error:
-          error.message
-      }
-    );
-  }
+    }
 }
 
-/* =========================================================
+/* ============================================================
+   GROUP SYNC LOOP
+============================================================ */
+
+let groupSyncTimer = null;
+
+function startGroupSyncLoop() {
+
+    stopGroupSyncLoop();
+
+    groupSyncTimer =
+        setInterval(
+            async () => {
+
+                if (
+                    agentStatus !==
+                    "CONNECTED"
+                ) {
+                    return;
+                }
+
+                await syncGroups();
+
+            },
+            60_000
+        );
+}
+
+function stopGroupSyncLoop() {
+
+    if (groupSyncTimer) {
+
+        clearInterval(
+            groupSyncTimer
+        );
+
+        groupSyncTimer = null;
+    }
+}
+
+/* ============================================================
    EXPRESS
-========================================================= */
+============================================================ */
 
 const app =
-  express();
+    express();
 
 app.use(
-  express.json()
+    express.json({
+        limit: "1mb"
+    })
 );
 
 if (
-  fs.existsSync(DIST_DIR)
+    fs.existsSync(DIST_DIR)
 ) {
-  app.use(
-    express.static(
-      DIST_DIR
-    )
-  );
-}
-
-/* =========================================================
-   HTTP SERVER
-========================================================= */
-
-const server =
-  http.createServer(
-    app
-  );
-
-/* =========================================================
-   WEBSOCKET
-========================================================= */
-
-const wss =
-  new WebSocketServer({
-    server
-  });
-
-const activeSockets =
-  new Set();
-
-function broadcastWS(
-  event,
-  data
-) {
-  const message =
-    JSON.stringify({
-      event,
-
-      data,
-
-      timestamp:
-        new Date().toISOString()
-    });
-
-  for (
-    const socket of activeSockets
-  ) {
-    if (
-      socket.readyState ===
-      1
-    ) {
-      try {
-        socket.send(
-          message
-        );
-      } catch (error) {
-        console.error(
-          'WebSocket send failed:',
-          error
-        );
-      }
-    }
-  }
-}
-
-/* =========================================================
-   WEBSOCKET CONNECTION
-========================================================= */
-
-wss.on(
-  'connection',
-  async ws => {
-    activeSockets.add(ws);
-
-    console.log(
-      '🔌 Dashboard WebSocket connected'
+    app.use(
+        express.static(
+            DIST_DIR
+        )
     );
+}
 
-    /*
-     * Don't block initial state on getChats().
-     * Send cached groups immediately.
-     */
+/* ============================================================
+   REST API
+============================================================ */
 
-    ws.send(
-      JSON.stringify({
-        event:
-          'INITIAL_STATE',
+app.get(
+    "/api/status",
+    async (req, res) => {
 
-        data: {
-          status: {
+        res.json({
             status:
-              agentStatus,
+                agentStatus,
 
-            qrCodeUrl,
+            phone:
+                connectedPhone,
 
-            userPhone,
+            authenticated:
+                Boolean(
+                    client?.info
+                ),
 
-            mode:
-              aiService.mode,
+            groups:
+                getGroupList(),
 
-            antiBan: {
-              enabled:
-                antiBan.enableTyping,
-
-              minDelayMs:
-                antiBan.minDelayMs,
-
-              maxDelayMs:
-                antiBan.maxDelayMs
-            },
-
-            logs:
-              logs.slice(
-                0,
-                50
-              )
-          },
-
-          usage:
-            rateLimiter.getUsageStats(),
-
-          groups:
-            cachedGroups,
-
-          selectedGroupIds
-        }
-      })
-    );
-
-    /*
-     * If already connected,
-     * refresh groups in background.
-     */
-
-    if (
-      client &&
-      agentStatus ===
-        'CONNECTED'
-    ) {
-      fetchRealGroups({
-        maxAttempts: 3,
-        delayMs: 2000
-      }).catch(
-        error => {
-          console.error(
-            'Background group refresh failed:',
-            error
-          );
-        }
-      );
+            selectedGroups:
+                settings.selectedGroups
+        });
     }
+);
 
-    ws.on(
-      'message',
-      async buffer => {
+app.get(
+    "/api/groups",
+    async (req, res) => {
+
+        /*
+          Do not call getChats().
+        */
+
+        const groups =
+            getGroupList();
+
+        res.json({
+            success: true,
+            count:
+                groups.length,
+            groups
+        });
+    }
+);
+
+app.post(
+    "/api/groups/sync",
+    async (req, res) => {
+
         try {
-          const message =
-            JSON.parse(
-              buffer.toString()
-            );
-
-          const action =
-            message.action;
-
-          const payload =
-            message.payload || {};
-
-          console.log(
-            'Dashboard action:',
-            action
-          );
-
-          /* -----------------------------------
-             CONNECT
-          ----------------------------------- */
-
-          if (
-            action ===
-            'CONNECT'
-          ) {
-            await initWhatsApp();
-          }
-
-          /* -----------------------------------
-             DISCONNECT
-          ----------------------------------- */
-
-          else if (
-            action ===
-            'DISCONNECT'
-          ) {
-            if (client) {
-              try {
-                await client.logout();
-              } catch (error) {
-                console.warn(
-                  'Logout failed:',
-                  error.message
-                );
-              }
-
-              client = null;
-            }
-
-            agentStatus =
-              'DISCONNECTED';
-
-            qrCodeUrl = '';
-
-            userPhone = '';
-
-            cachedGroups = [];
-
-            broadcastWS(
-              'STATUS_CHANGED',
-              {
-                status:
-                  agentStatus
-              }
-            );
-
-            addLog(
-              'INFO',
-              'Logged out from WhatsApp Web.'
-            );
-          }
-
-          /* -----------------------------------
-             FETCH GROUPS
-          ----------------------------------- */
-
-          else if (
-            action ===
-            'FETCH_GROUPS'
-          ) {
-            console.log(
-              'Manual group fetch requested'
-            );
-
-            if (
-              !client
-            ) {
-              ws.send(
-                JSON.stringify({
-                  event:
-                    'GROUPS_ERROR',
-
-                  data: {
-                    error:
-                      'WhatsApp client is not initialized.'
-                  }
-                })
-              );
-
-              return;
-            }
 
             const groups =
-              await fetchRealGroups({
-                maxAttempts: 10,
-                delayMs: 2000,
-                force: true
-              });
+                await syncGroups();
 
-            ws.send(
-              JSON.stringify({
-                event:
-                  'GROUPS_LIST',
+            res.json({
+                success: true,
+                count:
+                    groups.length,
+                groups
+            });
 
-                data: {
-                  groups
-                }
-              })
-            );
-          }
+        } catch (err) {
 
-          /* -----------------------------------
-             SET SELECTED GROUPS
-          ----------------------------------- */
-
-          else if (
-            action ===
-            'SET_SELECTED_GROUPS'
-          ) {
-            if (
-              Array.isArray(
-                payload.groups
-              )
-            ) {
-              selectedGroupIds =
-                payload.groups;
-
-              saveSelectedGroups(
-                selectedGroupIds
-              );
-
-              broadcastWS(
-                'SELECTED_GROUPS_UPDATED',
-                {
-                  selectedGroupIds
-                }
-              );
-
-              addLog(
-                'INFO',
-                `Updated selected groups: ${selectedGroupIds.length}`
-              );
-            }
-          }
-
-          /* -----------------------------------
-             SETTINGS
-          ----------------------------------- */
-
-          else if (
-            action ===
-            'UPDATE_SETTINGS'
-          ) {
-            if (
-              payload.aiMode
-            ) {
-              aiService.mode =
-                payload.aiMode;
-            }
-
-            if (
-              payload.maxDailyLimit
-            ) {
-              rateLimiter.setDailyLimit(
-                payload.maxDailyLimit
-              );
-            }
-
-            broadcastWS(
-              'SETTINGS_UPDATED',
-              {
-                mode:
-                  aiService.mode,
-
-                maxDailyLimit:
-                  rateLimiter.getUsageStats()
-                    .maxDailyLimit
-              }
-            );
-          }
-
-          /* -----------------------------------
-             DEBUG
-          ----------------------------------- */
-
-          else if (
-            action ===
-            'DEBUG_WHATSAPP'
-          ) {
-            await printWhatsAppDiagnostics();
-
-            ws.send(
-              JSON.stringify({
-                event:
-                  'WHATSAPP_DEBUG',
-
-                data: {
-                  status:
-                    agentStatus,
-
-                  userPhone,
-
-                  chats:
-                    lastChatCount,
-
-                  contacts:
-                    lastContactCount,
-
-                  groups:
-                    cachedGroups.length,
-
-                  authDir:
-                    AUTH_DIR
-                }
-              })
-            );
-          }
-        } catch (error) {
-          console.error(
-            'WebSocket message error:',
-            error
-          );
-
-          ws.send(
-            JSON.stringify({
-              event:
-                'ERROR',
-
-              data: {
+            res.status(500).json({
+                success: false,
                 error:
-                  error.message
-              }
-            })
-          );
+                    errorString(err)
+            });
         }
-      }
+    }
+);
+
+app.post(
+    "/api/groups/select",
+    (req, res) => {
+
+        const groups =
+            req.body?.groups;
+
+        if (
+            !Array.isArray(groups)
+        ) {
+            return res.status(400).json({
+                success: false,
+                error:
+                    "groups must be an array"
+            });
+        }
+
+        settings.selectedGroups =
+            groups;
+
+        saveSettings();
+
+        broadcast(
+            "SELECTED_GROUPS_UPDATED",
+            {
+                selectedGroups:
+                    settings.selectedGroups
+            }
+        );
+
+        res.json({
+            success: true,
+            selectedGroups:
+                settings.selectedGroups
+        });
+    }
+);
+
+app.post(
+    "/api/groups/send",
+    async (req, res) => {
+
+        try {
+
+            const {
+                groupId,
+                message,
+                typingMs
+            } = req.body || {};
+
+            if (!groupId) {
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "groupId is required"
+                });
+            }
+
+            if (!message) {
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "message is required"
+                });
+            }
+
+            await sendGroupMessage(
+                groupId,
+                message,
+                {
+                    minTypingMs:
+                        typingMs ||
+                        settings.minTypingMs,
+
+                    maxTypingMs:
+                        typingMs ||
+                        settings.maxTypingMs
+                }
+            );
+
+            res.json({
+                success: true,
+                groupId,
+                message
+            });
+
+        } catch (err) {
+
+            res.status(500).json({
+                success: false,
+                error:
+                    errorString(err)
+            });
+        }
+    }
+);
+
+app.get(
+    "/api/diagnostics",
+    async (req, res) => {
+
+        const page =
+            await pageDiagnostics();
+
+        res.json({
+            status:
+                agentStatus,
+
+            phone:
+                connectedPhone,
+
+            groups:
+                getGroupList(),
+
+            page
+        });
+    }
+);
+
+app.post(
+    "/api/connect",
+    async (req, res) => {
+
+        initWhatsApp();
+
+        res.json({
+            success: true,
+            status:
+                agentStatus
+        });
+    }
+);
+
+app.post(
+    "/api/disconnect",
+    async (req, res) => {
+
+        try {
+
+            stopGroupSyncLoop();
+
+            if (client) {
+
+                await client.logout()
+                    .catch(() => {});
+
+                await client.destroy()
+                    .catch(() => {});
+            }
+
+        } catch {}
+
+        client = null;
+
+        setStatus(
+            "DISCONNECTED"
+        );
+
+        res.json({
+            success: true
+        });
+    }
+);
+
+/* ============================================================
+   HTTP + WS
+============================================================ */
+
+const server =
+    http.createServer(
+        app
     );
 
-    ws.on(
-      'close',
-      () => {
-        activeSockets.delete(
-          ws
+const wss =
+    new WebSocketServer({
+        server
+    });
+
+wss.on(
+    "connection",
+    async ws => {
+
+        sockets.add(ws);
+
+        log(
+            "INFO",
+            "Dashboard WebSocket connected"
+        );
+
+        sendWS(
+            ws,
+            "INITIAL_STATE",
+            {
+                status: {
+                    status:
+                        agentStatus,
+
+                    qrCodeUrl,
+
+                    userPhone:
+                        connectedPhone
+                },
+
+                groups:
+                    getGroupList(),
+
+                selectedGroups:
+                    settings.selectedGroups,
+
+                logs:
+                    logs.slice(
+                        0,
+                        50
+                    )
+            }
+        );
+
+        ws.on(
+            "message",
+            async buffer => {
+
+                try {
+
+                    const request =
+                        JSON.parse(
+                            buffer.toString()
+                        );
+
+                    const action =
+                        request.action;
+
+                    const payload =
+                        request.payload ||
+                        {};
+
+                    /* -------------------------
+                       CONNECT
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "CONNECT"
+                    ) {
+
+                        await initWhatsApp();
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       DISCONNECT
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "DISCONNECT"
+                    ) {
+
+                        try {
+
+                            await client
+                                ?.logout()
+                                .catch(
+                                    () => {}
+                                );
+
+                            await client
+                                ?.destroy()
+                                .catch(
+                                    () => {}
+                                );
+
+                        } catch {}
+
+                        client = null;
+
+                        stopGroupSyncLoop();
+
+                        setStatus(
+                            "DISCONNECTED"
+                        );
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       FETCH GROUPS
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "FETCH_GROUPS"
+                    ) {
+
+                        /*
+                          Safe sync only.
+                          No client.getChats().
+                        */
+
+                        const groups =
+                            await syncGroups();
+
+                        sendWS(
+                            ws,
+                            "GROUPS_LIST",
+                            {
+                                groups
+                            }
+                        );
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       SELECT GROUPS
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "SET_SELECTED_GROUPS"
+                    ) {
+
+                        if (
+                            !Array.isArray(
+                                payload.groups
+                            )
+                        ) {
+                            throw new Error(
+                                "groups must be an array"
+                            );
+                        }
+
+                        settings.selectedGroups =
+                            payload.groups;
+
+                        saveSettings();
+
+                        broadcast(
+                            "SELECTED_GROUPS_UPDATED",
+                            {
+                                selectedGroups:
+                                    settings.selectedGroups
+                            }
+                        );
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       SEND GROUP MESSAGE
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "SEND_GROUP_MESSAGE"
+                    ) {
+
+                        const groupId =
+                            payload.groupId;
+
+                        const message =
+                            payload.message;
+
+                        if (
+                            !groupId ||
+                            !message
+                        ) {
+                            throw new Error(
+                                "groupId and message are required"
+                            );
+                        }
+
+                        await sendGroupMessage(
+                            groupId,
+                            message,
+                            payload
+                        );
+
+                        return;
+                    }
+
+                    /* -------------------------
+                       DIAGNOSTICS
+                    ------------------------- */
+
+                    if (
+                        action ===
+                        "DIAGNOSTICS"
+                    ) {
+
+                        const page =
+                            await diagnostics();
+
+                        sendWS(
+                            ws,
+                            "DIAGNOSTICS",
+                            {
+                                page,
+                                groups:
+                                    getGroupList()
+                            }
+                        );
+
+                        return;
+                    }
+
+                } catch (err) {
+
+                    log(
+                        "ERROR",
+                        "WebSocket action failed",
+                        {
+                            error:
+                                errorString(err)
+                        }
+                    );
+
+                    sendWS(
+                        ws,
+                        "ERROR",
+                        {
+                            error:
+                                errorString(err)
+                        }
+                    );
+                }
+            }
+        );
+
+        ws.on(
+            "close",
+            () => {
+
+                sockets.delete(
+                    ws
+                );
+
+                log(
+                    "INFO",
+                    "Dashboard WebSocket disconnected"
+                );
+            }
+        );
+    }
+);
+
+/* ============================================================
+   SPA FALLBACK
+============================================================ */
+
+if (
+    fs.existsSync(
+        path.join(
+            DIST_DIR,
+            "index.html"
+        )
+    )
+) {
+
+    app.get(
+        "*",
+        (req, res) => {
+
+            res.sendFile(
+                path.join(
+                    DIST_DIR,
+                    "index.html"
+                )
+            );
+        }
+    );
+}
+
+/* ============================================================
+   START SERVER
+============================================================ */
+
+server.listen(
+    PORT,
+    () => {
+
+        console.log(
+            "\n=============================================="
         );
 
         console.log(
-          '🔌 Dashboard WebSocket disconnected'
-        );
-      }
-    );
-
-    ws.on(
-      'error',
-      error => {
-        console.error(
-          'WebSocket error:',
-          error
+            "🚀 WhatsApp Web AI Agent"
         );
 
-        activeSockets.delete(
-          ws
+        console.log(
+            `🌐 http://localhost:${PORT}`
         );
-      }
-    );
-  }
-);
 
-/* =========================================================
-   HEALTH API
-========================================================= */
+        console.log(
+            `📁 Auth: ${AUTH_DIR}`
+        );
 
-app.get(
-  '/api/health',
-  async (req, res) => {
-    let state = null;
+        console.log(
+            `📁 Data: ${DATA_DIR}`
+        );
 
-    if (client) {
-      try {
-        state =
-          await client.getState();
-      } catch {}
+        console.log(
+            "==============================================\n"
+        );
+
+        /*
+          Start WhatsApp automatically.
+        */
+
+        initWhatsApp()
+            .catch(err => {
+
+                log(
+                    "ERROR",
+                    "Automatic WhatsApp startup failed",
+                    {
+                        error:
+                            errorString(err)
+                    }
+                );
+            });
     }
-
-    res.json({
-      ok: true,
-
-      server:
-        'online',
-
-      whatsapp: {
-        status:
-          agentStatus,
-
-        state,
-
-        connected:
-          Boolean(client),
-
-        phone:
-          userPhone,
-
-        chats:
-          lastChatCount,
-
-        contacts:
-          lastContactCount,
-
-        groups:
-          cachedGroups.length
-      },
-
-      timestamp:
-        new Date().toISOString()
-    });
-  }
 );
 
-/* =========================================================
-   GROUP API
-========================================================= */
-
-app.get(
-  '/api/groups',
-  async (req, res) => {
-    try {
-      const groups =
-        client &&
-        agentStatus ===
-          'CONNECTED'
-          ? await fetchRealGroups({
-              maxAttempts: 5,
-              delayMs: 1500
-            })
-          : cachedGroups;
-
-      res.json({
-        ok: true,
-
-        groups,
-
-        count:
-          groups.length,
-
-        selectedGroupIds
-      });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-
-        error:
-          error.message,
-
-        groups:
-          cachedGroups
-      });
-    }
-  }
-);
-
-/* =========================================================
-   USAGE API
-========================================================= */
-
-app.get(
-  '/api/usage',
-  (req, res) => {
-    res.json(
-      rateLimiter.getUsageStats()
-    );
-  }
-);
-
-/* =========================================================
-   SPA FALLBACK
-========================================================= */
-
-if (
-  fs.existsSync(
-    path.join(
-      DIST_DIR,
-      'index.html'
-    )
-  )
-) {
-  app.get(
-    '*',
-    (req, res) => {
-      res.sendFile(
-        path.join(
-          DIST_DIR,
-          'index.html'
-        )
-      );
-    }
-  );
-}
-
-/* =========================================================
-   SERVER START
-========================================================= */
-
-server.listen(
-  PORT,
-  () => {
-    console.log(
-      '\n=================================================='
-    );
-
-    console.log(
-      '🚀 WhatsApp Web AI Agent Server'
-    );
-
-    console.log(
-      `🌐 Port: ${PORT}`
-    );
-
-    console.log(
-      `📁 Auth: ${AUTH_DIR}`
-    );
-
-    console.log(
-      `📁 Data: ${DATA_DIR}`
-    );
-
-    console.log(
-      '==================================================\n'
-    );
-
-    /*
-     * Automatically initialize WhatsApp.
-     */
-
-    initWhatsApp().catch(
-      error => {
-        console.error(
-          'Startup WhatsApp error:',
-          error
-        );
-      }
-    );
-  }
-);
-
-/* =========================================================
-   PROCESS ERROR HANDLING
-========================================================= */
+/* ============================================================
+   GLOBAL ERROR PROTECTION
+============================================================ */
 
 process.on(
-  'uncaughtException',
-  error => {
-    console.error(
-      'UNCAUGHT EXCEPTION:',
-      error
-    );
+    "unhandledRejection",
+    reason => {
 
-    addLog(
-      'ERROR',
-      `Uncaught exception: ${error.message}`,
-      {
-        stack:
-          error.stack
-      }
-    );
-  }
+        log(
+            "ERROR",
+            "Unhandled promise rejection",
+            {
+                error:
+                    errorString(reason)
+            }
+        );
+    }
 );
 
 process.on(
-  'unhandledRejection',
-  reason => {
-    console.error(
-      'UNHANDLED REJECTION:',
-      reason
-    );
+    "uncaughtException",
+    err => {
 
-    addLog(
-      'ERROR',
-      `Unhandled rejection: ${reason?.message || reason}`
-    );
-  }
-);
-
-process.on(
-  'SIGTERM',
-  async () => {
-    console.log(
-      'SIGTERM received'
-    );
-
-    try {
-      if (client) {
-        await client.destroy();
-      }
-    } catch (error) {
-      console.error(
-        'WhatsApp destroy failed:',
-        error
-      );
+        log(
+            "ERROR",
+            "Uncaught exception",
+            {
+                error:
+                    errorString(err)
+            }
+        );
     }
-
-    process.exit(0);
-  }
-);
-
-process.on(
-  'SIGINT',
-  async () => {
-    console.log(
-      'SIGINT received'
-    );
-
-    try {
-      if (client) {
-        await client.destroy();
-      }
-    } catch (error) {
-      console.error(
-        'WhatsApp destroy failed:',
-        error
-      );
-    }
-
-    process.exit(0);
-  }
 );

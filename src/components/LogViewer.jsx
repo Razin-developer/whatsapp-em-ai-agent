@@ -42,7 +42,7 @@ export default function LogViewer({ logs = [] }) {
       <div className="bg-gray-950/90 rounded-xl border border-gray-800/80 p-3 h-64 overflow-y-auto font-mono text-xs space-y-2">
         {logs.length === 0 ? (
           <div className="text-center text-gray-600 py-10">
-            Waiting for activity... Logs will stream here live when @EM is mentioned.
+            Waiting for activity... Logs will stream here live when @AI is mentioned.
           </div>
         ) : (
           logs.map((log) => (

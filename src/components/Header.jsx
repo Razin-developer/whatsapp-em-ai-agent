@@ -48,7 +48,7 @@ export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR, 
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-bold tracking-tight text-white">WhatsApp @EM AI Agent</h1>
+              <h1 className="text-lg font-bold tracking-tight text-white">WhatsApp AI Agent</h1>
               <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                 HackAI SDK
               </span>
