@@ -6,23 +6,93 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import qrcode from 'qrcode';
 import pkg from 'whatsapp-web.js';
+
 const { Client, LocalAuth } = pkg;
 
 dotenv.config();
 
-const PORT = process.env.PORT || 3001;
-const HACKAI_API_KEY = process.env.HACKAI_API_KEY || '';
+/* =========================================================
+   CONFIG
+========================================================= */
+
+const PORT = Number(process.env.PORT || 3001);
+
+const HACKAI_API_KEY =
+  process.env.HACKAI_API_KEY || '';
+
 const DATA_DIR = path.resolve('./data');
-const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
-const GROUPS_FILE = path.join(DATA_DIR, 'selected_groups.json');
 
-// --- 1. HackAI SDK Dynamic Import ---
+const USAGE_FILE =
+  path.join(DATA_DIR, 'usage.json');
+
+const GROUPS_FILE =
+  path.join(DATA_DIR, 'selected_groups.json');
+
+const AUTH_DIR =
+  path.join(DATA_DIR, 'whatsapp-auth');
+
+const DIST_DIR =
+  path.resolve('./dist');
+
+fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+/* =========================================================
+   LOGGING
+========================================================= */
+
+let logs = [];
+
+function addLog(type, message, details = {}) {
+  const logItem = {
+    id:
+      Date.now() +
+      Math.random().toString(36).substring(2, 7),
+
+    type,
+    message,
+    details,
+    timestamp: new Date().toISOString()
+  };
+
+  logs.unshift(logItem);
+
+  if (logs.length > 100) {
+    logs.length = 100;
+  }
+
+  console.log(
+    `[${type}] ${message}`,
+    Object.keys(details).length
+      ? details
+      : ''
+  );
+
+  broadcastWS('LOG_ADDED', logItem);
+}
+
+/* =========================================================
+   HACKAI SDK
+========================================================= */
+
 let hackAiSdk = null;
-try {
-  hackAiSdk = await import('@razinmohammedpt/hackai-sdk');
-} catch (e) {}
 
-// --- 2. Per-Number Rate Limiter (Max 5 / day) ---
+try {
+  hackAiSdk =
+    await import('@razinmohammedpt/hackai-sdk');
+
+  console.log('✅ HackAI SDK loaded');
+} catch (error) {
+  console.warn(
+    '⚠️ HackAI SDK unavailable:',
+    error.message
+  );
+}
+
+/* =========================================================
+   RATE LIMITER
+========================================================= */
+
 class RateLimiter {
   constructor(maxDailyLimit = 5) {
     this.maxDailyLimit = maxDailyLimit;
@@ -30,134 +100,348 @@ class RateLimiter {
   }
 
   ensureDataFile() {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+
     if (!fs.existsSync(USAGE_FILE)) {
-      fs.writeFileSync(USAGE_FILE, JSON.stringify({ records: {}, config: { maxDailyLimit: 5 } }, null, 2));
+      fs.writeFileSync(
+        USAGE_FILE,
+        JSON.stringify(
+          {
+            records: {},
+            config: {
+              maxDailyLimit: this.maxDailyLimit
+            }
+          },
+          null,
+          2
+        )
+      );
     }
   }
 
   getTodayKey() {
-    return new Date().toISOString().split('T')[0];
+    return new Date()
+      .toISOString()
+      .split('T')[0];
   }
 
   cleanPhoneNumber(rawNumber) {
-    if (!rawNumber) return 'Unknown';
-    return rawNumber.replace(/@c\.us|@g\.us|@s\.whatsapp\.net/g, '').replace(/[^0-9+]/g, '');
+    if (!rawNumber) {
+      return 'Unknown';
+    }
+
+    return String(rawNumber)
+      .replace(
+        /@c\.us|@g\.us|@s\.whatsapp\.net/g,
+        ''
+      )
+      .replace(/[^0-9+]/g, '');
   }
 
   loadData() {
     try {
       this.ensureDataFile();
-      return JSON.parse(fs.readFileSync(USAGE_FILE, 'utf-8'));
-    } catch (e) {
-      return { records: {}, config: { maxDailyLimit: this.maxDailyLimit } };
+
+      return JSON.parse(
+        fs.readFileSync(
+          USAGE_FILE,
+          'utf8'
+        )
+      );
+    } catch (error) {
+      console.error(
+        'Failed to load usage data:',
+        error
+      );
+
+      return {
+        records: {},
+        config: {
+          maxDailyLimit:
+            this.maxDailyLimit
+        }
+      };
     }
   }
 
   saveData(data) {
     try {
-      fs.writeFileSync(USAGE_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {}
+      this.ensureDataFile();
+
+      fs.writeFileSync(
+        USAGE_FILE,
+        JSON.stringify(
+          data,
+          null,
+          2
+        )
+      );
+    } catch (error) {
+      console.error(
+        'Failed to save usage data:',
+        error
+      );
+    }
   }
 
   canAccess(phoneNumber) {
-    const cleanNumber = this.cleanPhoneNumber(phoneNumber);
-    const today = this.getTodayKey();
-    const data = this.loadData();
-    const limit = data.config?.maxDailyLimit || this.maxDailyLimit;
+    const cleanNumber =
+      this.cleanPhoneNumber(phoneNumber);
 
-    if (!data.records[cleanNumber] || data.records[cleanNumber].lastDate !== today) {
-      return { allowed: true, count: 0, limit, remaining: limit };
+    const today =
+      this.getTodayKey();
+
+    const data =
+      this.loadData();
+
+    const limit =
+      data.config?.maxDailyLimit ??
+      this.maxDailyLimit;
+
+    const record =
+      data.records[cleanNumber];
+
+    if (
+      !record ||
+      record.lastDate !== today
+    ) {
+      return {
+        allowed: true,
+        count: 0,
+        limit,
+        remaining: limit
+      };
     }
-    const currentCount = data.records[cleanNumber].count || 0;
+
+    const count =
+      record.count || 0;
+
     return {
-      allowed: currentCount < limit,
-      count: currentCount,
+      allowed: count < limit,
+      count,
       limit,
-      remaining: Math.max(0, limit - currentCount)
+      remaining: Math.max(
+        0,
+        limit - count
+      )
     };
   }
 
-  recordAccess(phoneNumber, pushName = '') {
-    const cleanNumber = this.cleanPhoneNumber(phoneNumber);
-    const today = this.getTodayKey();
-    const data = this.loadData();
+  recordAccess(
+    phoneNumber,
+    pushName = ''
+  ) {
+    const cleanNumber =
+      this.cleanPhoneNumber(phoneNumber);
 
-    if (!data.records[cleanNumber] || data.records[cleanNumber].lastDate !== today) {
+    const today =
+      this.getTodayKey();
+
+    const data =
+      this.loadData();
+
+    if (
+      !data.records[cleanNumber] ||
+      data.records[cleanNumber].lastDate !== today
+    ) {
       data.records[cleanNumber] = {
-        name: pushName || cleanNumber,
+        name:
+          pushName ||
+          cleanNumber,
+
         count: 1,
+
         lastDate: today,
-        lastTimestamp: new Date().toISOString()
+
+        lastTimestamp:
+          new Date().toISOString()
       };
     } else {
       data.records[cleanNumber].count += 1;
-      data.records[cleanNumber].name = pushName || data.records[cleanNumber].name;
-      data.records[cleanNumber].lastTimestamp = new Date().toISOString();
+
+      data.records[cleanNumber].name =
+        pushName ||
+        data.records[cleanNumber].name;
+
+      data.records[cleanNumber].lastTimestamp =
+        new Date().toISOString();
     }
+
     this.saveData(data);
+
     return data.records[cleanNumber];
   }
 
   getUsageStats() {
-    const data = this.loadData();
-    const today = this.getTodayKey();
-    const limit = data.config?.maxDailyLimit || this.maxDailyLimit;
+    const data =
+      this.loadData();
 
-    const userList = Object.entries(data.records).map(([number, record]) => {
-      const isToday = record.lastDate === today;
-      const count = isToday ? record.count : 0;
-      return {
-        number,
-        name: record.name || number,
-        countToday: count,
-        limit,
-        remaining: Math.max(0, limit - count),
-        status: count >= limit ? 'LIMIT_REACHED' : count > 0 ? 'ACTIVE' : 'IDLE',
-        lastTimestamp: record.lastTimestamp
-      };
-    });
+    const today =
+      this.getTodayKey();
+
+    const limit =
+      data.config?.maxDailyLimit ??
+      this.maxDailyLimit;
+
+    const users =
+      Object.entries(data.records)
+        .map(([number, record]) => {
+          const isToday =
+            record.lastDate === today;
+
+          const count =
+            isToday
+              ? record.count
+              : 0;
+
+          return {
+            number,
+
+            name:
+              record.name ||
+              number,
+
+            countToday:
+              count,
+
+            limit,
+
+            remaining:
+              Math.max(
+                0,
+                limit - count
+              ),
+
+            status:
+              count >= limit
+                ? 'LIMIT_REACHED'
+                : count > 0
+                  ? 'ACTIVE'
+                  : 'IDLE',
+
+            lastTimestamp:
+              record.lastTimestamp
+          };
+        })
+        .sort(
+          (a, b) =>
+            new Date(b.lastTimestamp) -
+            new Date(a.lastTimestamp)
+        );
 
     return {
       today,
-      maxDailyLimit: limit,
-      totalUsers: userList.length,
-      activeToday: userList.filter(u => u.countToday > 0).length,
-      users: userList.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
+
+      maxDailyLimit:
+        limit,
+
+      totalUsers:
+        users.length,
+
+      activeToday:
+        users.filter(
+          user =>
+            user.countToday > 0
+        ).length,
+
+      users
     };
   }
 
   setDailyLimit(newLimit) {
-    const data = this.loadData();
-    this.maxDailyLimit = Number(newLimit);
-    if (!data.config) data.config = {};
-    data.config.maxDailyLimit = Number(newLimit);
+    const limit =
+      Number(newLimit);
+
+    if (
+      !Number.isFinite(limit) ||
+      limit < 1
+    ) {
+      return;
+    }
+
+    const data =
+      this.loadData();
+
+    this.maxDailyLimit =
+      limit;
+
+    data.config = {
+      ...(data.config || {}),
+      maxDailyLimit: limit
+    };
+
     this.saveData(data);
   }
 }
 
-const rateLimiter = new RateLimiter();
+const rateLimiter =
+  new RateLimiter(5);
 
-// --- 3. Selected Groups Store ---
+/* =========================================================
+   SELECTED GROUPS
+========================================================= */
+
 function loadSelectedGroups() {
   try {
-    if (fs.existsSync(GROUPS_FILE)) {
-      return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf-8')).groups || ['ALL'];
+    if (
+      fs.existsSync(GROUPS_FILE)
+    ) {
+      const data =
+        JSON.parse(
+          fs.readFileSync(
+            GROUPS_FILE,
+            'utf8'
+          )
+        );
+
+      if (
+        Array.isArray(data.groups)
+      ) {
+        return data.groups;
+      }
     }
-  } catch (e) {}
+  } catch (error) {
+    console.error(
+      'Failed loading selected groups:',
+      error
+    );
+  }
+
   return ['ALL'];
 }
 
-function saveSelectedGroups(groupsArray) {
+function saveSelectedGroups(
+  groups
+) {
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(GROUPS_FILE, JSON.stringify({ groups: groupsArray }, null, 2));
-  } catch (e) {}
+    fs.mkdirSync(
+      DATA_DIR,
+      { recursive: true }
+    );
+
+    fs.writeFileSync(
+      GROUPS_FILE,
+      JSON.stringify(
+        { groups },
+        null,
+        2
+      )
+    );
+  } catch (error) {
+    console.error(
+      'Failed saving selected groups:',
+      error
+    );
+  }
 }
 
-let selectedGroupIds = loadSelectedGroups();
+let selectedGroupIds =
+  loadSelectedGroups();
 
-// --- 4. AI Service ---
+/* =========================================================
+   AI SERVICE (HACKAI SDK EXCLUSIVE)
+========================================================= */
+
 class AIService {
   constructor() {
     this.mode = 'AUTO'; // AUTO | SHORT_HUMAN | HIGH_DETAIL
@@ -171,50 +455,65 @@ class AIService {
   }
 
   async generateResponse(prompt, senderName = 'Friend') {
-    const effectiveMode = (this.mode === 'AUTO') ? this.detectDesiredMode(prompt) : this.mode;
+    const mode = this.mode === 'AUTO' ? this.detectDesiredMode(prompt) : this.mode;
 
-    const systemInstruction = effectiveMode === 'SHORT_HUMAN'
-      ? `You are a friendly, smart WhatsApp AI Assistant. Keep response VERY SHORT, natural, informal, and human-like (1-3 sentences max).`
-      : `You are a helpful WhatsApp AI Assistant. Provide a detailed, well-structured response formatted with WhatsApp markdown (*bold*, bullet points •).`;
+    const systemInstruction = mode === 'SHORT_HUMAN'
+      ? `You are a friendly, smart WhatsApp AI Assistant for ${senderName}. Keep response VERY SHORT, natural, informal, and human-like (1-3 sentences max).`
+      : `You are a helpful WhatsApp AI Assistant for ${senderName}. Provide a detailed, well-structured response using WhatsApp markdown (*bold*, bullet points •).`;
+
+    if (!HACKAI_API_KEY) {
+      return `⚠️ HackAI API Key is missing. Please set HACKAI_API_KEY in your .env file.`;
+    }
 
     try {
-      if (hackAiSdk && (hackAiSdk.Client || hackAiSdk.generateText || hackAiSdk.default)) {
-        const client = hackAiSdk.Client ? new hackAiSdk.Client({ apiKey: HACKAI_API_KEY }) : hackAiSdk.default;
-        if (client && typeof client.chat === 'function') {
-          const res = await client.chat({ system: systemInstruction, prompt });
-          if (res && res.text) return res.text;
-        }
+      if (!hackAiSdk) {
+        throw new Error('@razinmohammedpt/hackai-sdk module is not loaded');
       }
 
-      if (HACKAI_API_KEY) {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${HACKAI_API_KEY}` },
-          body: JSON.stringify({
-            model: 'gpt-3.5-turbo',
-            messages: [{ role: 'system', content: systemInstruction }, { role: 'user', content: prompt }],
-            max_tokens: effectiveMode === 'SHORT_HUMAN' ? 120 : 500
-          })
-        });
-        if (res.ok) {
-          const d = await res.json();
-          if (d.choices?.[0]?.message?.content) return d.choices[0].message.content.trim();
+      let aiText = '';
+
+      // Initialize HackAI SDK Client
+      const SDKClientClass = hackAiSdk.Client || hackAiSdk.default || hackAiSdk.HackAI;
+      if (typeof SDKClientClass === 'function') {
+        const clientInstance = new SDKClientClass({ apiKey: HACKAI_API_KEY });
+        if (typeof clientInstance.chat === 'function') {
+          const res = await clientInstance.chat({ system: systemInstruction, prompt });
+          aiText = res?.text || res?.content || res?.message || '';
+        } else if (typeof clientInstance.generateText === 'function') {
+          const res = await clientInstance.generateText({ system: systemInstruction, prompt });
+          aiText = res?.text || res?.content || res?.message || '';
         }
+      } else if (typeof hackAiSdk.generateText === 'function') {
+        const res = await hackAiSdk.generateText({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
+        aiText = res?.text || res?.content || res?.message || '';
+      } else if (typeof hackAiSdk.chat === 'function') {
+        const res = await hackAiSdk.chat({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
+        aiText = res?.text || res?.content || res?.message || '';
       }
 
-      const cleanQuery = prompt.replace(/@(ai|em)/gi, '').trim();
-      return effectiveMode === 'SHORT_HUMAN'
-        ? `Hey ${senderName}! Regarding "${cleanQuery.slice(0, 35)}...": I'm on it! Let me know if you need anything else. 👍`
-        : `🤖 *AI Assistant Report*\n\nHello ${senderName}! Here is the requested info for "${cleanQuery}":\n\n• Powered by HackAI SDK Engine.\n• Rate limit: 5/5 max per number.\n• Anti-ban protection active.`;
-    } catch (e) {
-      return `Hey ${senderName}, got your message regarding "${prompt.slice(0, 30)}"!`;
+      if (!aiText && typeof hackAiSdk.default === 'function') {
+        const res = await hackAiSdk.default({ apiKey: HACKAI_API_KEY, system: systemInstruction, prompt });
+        aiText = typeof res === 'string' ? res : (res?.text || res?.content || '');
+      }
+
+      if (aiText && typeof aiText === 'string') {
+        return aiText.trim();
+      }
+
+      throw new Error('HackAI SDK returned empty response');
+    } catch (error) {
+      console.error('❌ HackAI Generation Error:', error);
+      return `⚠️ HackAI Generation Failed: ${error.message || 'Unknown error'}`;
     }
   }
 }
 
 const aiService = new AIService();
 
-// --- 5. Anti-Ban Safety Engine ---
+/* =========================================================
+   TYPING / RESPONSE DELAY
+========================================================= */
+
 class AntiBanEngine {
   constructor() {
     this.minDelayMs = 2500;
@@ -222,293 +521,1855 @@ class AntiBanEngine {
     this.enableTyping = true;
   }
 
-  async executeAntiBanRoutine(chat, textLength = 40) {
-    const jitter = Math.floor(Math.random() * (this.maxDelayMs - this.minDelayMs + 1)) + this.minDelayMs;
-    const typingTime = Math.min(jitter, Math.max(1500, textLength * 35));
+  async execute(
+    chat,
+    textLength = 40
+  ) {
+    const jitter =
+      Math.floor(
+        Math.random() *
+          (
+            this.maxDelayMs -
+            this.minDelayMs +
+            1
+          )
+      ) +
+      this.minDelayMs;
 
-    if (this.enableTyping && chat && typeof chat.sendStateTyping === 'function') {
-      try { await chat.sendStateTyping(); } catch (e) {}
+    const typingTime =
+      Math.min(
+        jitter,
+        Math.max(
+          1500,
+          textLength * 35
+        )
+      );
+
+    if (
+      this.enableTyping &&
+      chat &&
+      typeof chat.sendStateTyping ===
+        'function'
+    ) {
+      try {
+        await chat.sendStateTyping();
+      } catch (error) {
+        console.warn(
+          'Typing state failed:',
+          error.message
+        );
+      }
     }
-    await new Promise(r => setTimeout(r, typingTime));
-    if (this.enableTyping && chat && typeof chat.clearState === 'function') {
-      try { await chat.clearState(); } catch (e) {}
+
+    await new Promise(
+      resolve =>
+        setTimeout(
+          resolve,
+          typingTime
+        )
+    );
+
+    if (
+      this.enableTyping &&
+      chat &&
+      typeof chat.clearState ===
+        'function'
+    ) {
+      try {
+        await chat.clearState();
+      } catch (error) {
+        console.warn(
+          'Clear typing failed:',
+          error.message
+        );
+      }
     }
   }
 }
 
-const antiBan = new AntiBanEngine();
+const antiBan =
+  new AntiBanEngine();
 
-// --- 6. WhatsApp Agent Engine (Headless Chrome + whatsapp-web.js) ---
+/* =========================================================
+   WHATSAPP STATE
+========================================================= */
+
 let client = null;
-let agentStatus = 'DISCONNECTED'; // DISCONNECTED | INITIALIZING | QR_READY | CONNECTED
+
+let initializing = false;
+
+let agentStatus =
+  'DISCONNECTED';
+
 let qrCodeUrl = '';
+
 let userPhone = '';
-let logs = [];
 
-function addLog(type, message, details = {}) {
-  const logItem = {
-    id: Date.now() + Math.random().toString(36).substr(2, 4),
-    type,
-    message,
-    details,
-    timestamp: new Date().toLocaleTimeString()
-  };
-  logs.unshift(logItem);
-  if (logs.length > 50) logs.pop();
-  broadcastWS('LOG_ADDED', logItem);
-}
+let cachedGroups = [];
 
-async function fetchRealGroups(maxRetries = 5, delayMs = 1500) {
-  if (!client || agentStatus !== 'CONNECTED') return [];
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const chats = await client.getChats();
-      const groups = chats.filter(c => c && (c.isGroup || c.id?._serialized?.endsWith('@g.us')));
-      
-      if (groups.length > 0 || attempt === maxRetries) {
-        addLog('INFO', `Discovered ${groups.length} WhatsApp Group(s) from WhatsApp Web.`);
-        return groups.map(c => ({
-          id: c.id._serialized,
-          name: c.name || 'Unnamed Group',
-          unreadCount: c.unreadCount || 0,
-          participantCount: Array.isArray(c.participants) ? c.participants.length : 0
-        }));
-      }
-    } catch (e) {
-      addLog('ERROR', `Error fetching chats (Attempt ${attempt}/${maxRetries}): ${e.message}`);
-    }
-    await new Promise(r => setTimeout(r, delayMs));
-  }
-  return [];
-}
+let lastChatCount = 0;
 
-async function initWhatsApp() {
-  if (client) return;
+let lastContactCount = 0;
 
-  agentStatus = 'INITIALIZING';
-  broadcastWS('STATUS_CHANGED', { status: agentStatus });
-  addLog('INFO', 'Initializing WhatsApp Client with Headless Chrome...');
+/* =========================================================
+   CHROME PATH
+========================================================= */
 
-  let chromePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-  if (!chromePath && process.platform === 'win32') {
-    const p1 = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-    const p2 = 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
-    if (fs.existsSync(p1)) chromePath = p1;
-    else if (fs.existsSync(p2)) chromePath = p2;
+function getChromePath() {
+  if (
+    process.env.PUPPETEER_EXECUTABLE_PATH
+  ) {
+    return process.env
+      .PUPPETEER_EXECUTABLE_PATH;
   }
 
-  client = new Client({
-    authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-    puppeteer: {
-      headless: true,
-      executablePath: chromePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+  if (
+    process.platform !==
+    'win32'
+  ) {
+    return undefined;
+  }
+
+  const possiblePaths = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+  ];
+
+  for (
+    const chromePath of possiblePaths
+  ) {
+    if (
+      fs.existsSync(chromePath)
+    ) {
+      return chromePath;
     }
-  });
+  }
 
-  client.on('qr', async (qrRaw) => {
-    agentStatus = 'QR_READY';
+  return undefined;
+}
+
+/* =========================================================
+   GROUP DISCOVERY
+========================================================= */
+
+async function fetchRealGroups(
+  options = {}
+) {
+  const {
+    maxAttempts = 20,
+    delayMs = 3000,
+    force = false
+  } = options;
+
+  if (!client) {
+    addLog(
+      'WARN',
+      'Cannot fetch groups: WhatsApp client is null.'
+    );
+
+    return cachedGroups;
+  }
+
+  if (
+    agentStatus !==
+      'CONNECTED' &&
+    !force
+  ) {
+    addLog(
+      'WARN',
+      `Cannot fetch groups: status is ${agentStatus}.`
+    );
+
+    return cachedGroups;
+  }
+
+  for (
+    let attempt = 1;
+    attempt <= maxAttempts;
+    attempt++
+  ) {
     try {
-      qrCodeUrl = await qrcode.toDataURL(qrRaw);
-      broadcastWS('QR_CODE', { qr: qrCodeUrl });
-      broadcastWS('STATUS_CHANGED', { status: agentStatus });
-      addLog('INFO', 'New WhatsApp QR Code generated. Ready to scan on Dashboard.');
-    } catch (e) {}
-  });
+      console.log(
+        `\n[GROUP SYNC] Attempt ${attempt}/${maxAttempts}`
+      );
 
-  client.on('authenticated', () => {
-    agentStatus = 'AUTHENTICATED';
-    qrCodeUrl = '';
-    broadcastWS('STATUS_CHANGED', { status: agentStatus });
-    addLog('INFO', 'WhatsApp Web authenticated successfully!');
-  });
-
-  client.on('auth_failure', (err) => {
-    agentStatus = 'ERROR';
-    broadcastWS('STATUS_CHANGED', { status: agentStatus, error: err?.message || 'Authentication Failed' });
-    addLog('ERROR', `WhatsApp Auth Failure: ${err?.message || 'Failed'}`);
-  });
-
-  client.on('ready', async () => {
-    agentStatus = 'CONNECTED';
-    userPhone = client.info?.wid?.user || 'Connected User';
-    broadcastWS('STATUS_CHANGED', { status: agentStatus, phone: userPhone });
-    addLog('INFO', `🤖 WhatsApp AI Agent is LIVE & READY for user: +${userPhone}`);
-
-    // Allow 2 seconds for WhatsApp Web to sync groups after ready event
-    setTimeout(async () => {
-      const groups = await fetchRealGroups();
-      broadcastWS('GROUPS_LIST', { groups });
-    }, 2000);
-  });
-
-  client.on('disconnected', (reason) => {
-    agentStatus = 'DISCONNECTED';
-    qrCodeUrl = '';
-    userPhone = '';
-    client = null;
-    broadcastWS('STATUS_CHANGED', { status: agentStatus, reason });
-    addLog('ERROR', `WhatsApp client disconnected: ${reason}`);
-  });
-
-  // Handle messages (including self-messages and group messages)
-  const handleIncomingMsg = async (msg) => {
-    const body = msg.body || '';
-
-    // Trigger Rule: @AI, @Ai, @aI, @ai, @EM, @em (case insensitive)
-    const isTriggered = /@(ai|em)/i.test(body) || (body.includes('@') && /\b(AI|EM)\b/i.test(body));
-
-    if (isTriggered) {
-      const chat = await msg.getChat().catch(() => null);
-
-      // Group Selection Filter
-      if (chat && chat.isGroup) {
-        const isAll = selectedGroupIds.includes('ALL');
-        const isSelected = selectedGroupIds.includes(chat.id._serialized);
-        if (!isAll && !isSelected) {
-          return; // Skip groups not selected by user
-        }
-      }
-
-      const senderNumber = msg.author || msg.from;
-      const cleanNumber = rateLimiter.cleanPhoneNumber(senderNumber);
-      const contact = await msg.getContact().catch(() => ({ pushname: cleanNumber }));
-      const pushName = contact.pushname || contact.name || cleanNumber;
-
-      addLog('TRIGGER', `Received @AI/@EM trigger from +${cleanNumber} (${pushName})`, { message: body, sender: cleanNumber, chat: chat?.name });
-
-      // Check Rate Limit (Max 5/day per number)
-      const accessCheck = rateLimiter.canAccess(senderNumber);
-
-      if (!accessCheck.allowed) {
-        addLog('RATE_LIMIT', `Denied +${cleanNumber}: Daily limit reached (${accessCheck.count}/${accessCheck.limit})`, { sender: cleanNumber });
-        if (chat) {
-          await antiBan.executeAntiBanRoutine(chat, 50);
-          await msg.reply(`⚠️ *Daily Limit Reached*\n\nHello +${cleanNumber}, you have reached your quota of ${accessCheck.limit} AI responses for today. Resets at 00:00 UTC.`);
-        }
-        broadcastWS('USAGE_UPDATED', rateLimiter.getUsageStats());
-        return;
-      }
-
-      // Anti-Ban Routine & AI Response
-      addLog('INFO', `Executing Anti-Ban typing simulation...`);
-      await antiBan.executeAntiBanRoutine(chat, body.length);
-
-      addLog('INFO', `Generating AI response using HackAI SDK...`);
-      const aiReply = await aiService.generateResponse(body, pushName);
-      const updatedRecord = rateLimiter.recordAccess(senderNumber, pushName);
+      let state = null;
 
       try {
-        await msg.reply(aiReply);
-        addLog('AI_REPLY', `Sent AI response to +${cleanNumber} (${updatedRecord.count}/5 today)`, { reply: aiReply, usage: `${updatedRecord.count}/5` });
-      } catch (e) {}
+        state =
+          await client.getState();
+      } catch (error) {
+        console.warn(
+          'getState failed:',
+          error.message
+        );
+      }
 
-      broadcastWS('USAGE_UPDATED', rateLimiter.getUsageStats());
+      console.log(
+        '[GROUP SYNC] WhatsApp state:',
+        state
+      );
+
+      if (
+        state &&
+        state !== 'CONNECTED' &&
+        !force
+      ) {
+        addLog(
+          'WARN',
+          `WhatsApp state is ${state}; waiting...`
+        );
+      }
+
+      const chats =
+        await client.getChats();
+
+      lastChatCount =
+        chats.length;
+
+      console.log(
+        `[GROUP SYNC] Total chats: ${chats.length}`
+      );
+
+      const groups =
+        chats.filter(chat => {
+          const serialized =
+            chat?.id?._serialized ||
+            '';
+
+          return (
+            chat?.isGroup === true ||
+            serialized.endsWith(
+              '@g.us'
+            )
+          );
+        });
+
+      console.log(
+        `[GROUP SYNC] Total groups: ${groups.length}`
+      );
+
+      /*
+       * IMPORTANT DEBUG OUTPUT
+       */
+
+      if (chats.length > 0) {
+        console.log(
+          '[GROUP SYNC] Sample chats:'
+        );
+
+        for (
+          const chat of chats.slice(
+            0,
+            15
+          )
+        ) {
+          console.log({
+            id:
+              chat?.id?._serialized,
+
+            name:
+              chat?.name,
+
+            type:
+              chat?.type,
+
+            isGroup:
+              chat?.isGroup
+          });
+        }
+      }
+
+      /*
+       * If WhatsApp has populated chats,
+       * we can confidently return groups.
+       */
+
+      if (
+        chats.length > 0
+      ) {
+        cachedGroups =
+          groups.map(group => ({
+            id:
+              group.id._serialized,
+
+            name:
+              group.name ||
+              'Unnamed Group',
+
+            unreadCount:
+              group.unreadCount ||
+              0,
+
+            participantCount:
+              Array.isArray(
+                group.participants
+              )
+                ? group.participants.length
+                : 0,
+
+            timestamp:
+              group.timestamp ||
+              null
+          }));
+
+        addLog(
+          'INFO',
+          `Discovered ${cachedGroups.length} WhatsApp group(s).`,
+          {
+            totalChats:
+              chats.length,
+
+            totalGroups:
+              cachedGroups.length
+          }
+        );
+
+        broadcastWS(
+          'GROUPS_LIST',
+          {
+            groups:
+              cachedGroups
+          }
+        );
+
+        return cachedGroups;
+      }
+
+      /*
+       * No chats yet.
+       */
+
+      addLog(
+        'WARN',
+        `WhatsApp chat store is still empty (${attempt}/${maxAttempts}). Waiting ${delayMs}ms...`,
+        {
+          state,
+          chats:
+            chats.length
+        }
+      );
+    } catch (error) {
+      console.error(
+        '[GROUP SYNC] ERROR:',
+        error
+      );
+
+      addLog(
+        'ERROR',
+        `getChats() failed on attempt ${attempt}/${maxAttempts}: ${error.message}`,
+        {
+          stack:
+            error.stack
+        }
+      );
     }
-  };
 
-  client.on('message', handleIncomingMsg);
-  client.on('message_create', async (msg) => {
-    if (msg.fromMe) {
-      await handleIncomingMsg(msg);
+    if (
+      attempt <
+      maxAttempts
+    ) {
+      await new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            delayMs
+          )
+      );
     }
-  });
+  }
 
-  await client.initialize().catch(err => {
-    agentStatus = 'ERROR';
-    broadcastWS('STATUS_CHANGED', { status: agentStatus, error: err.message });
-  });
+  /*
+   * FINAL DIAGNOSTICS
+   */
+
+  let finalState =
+    'UNKNOWN';
+
+  try {
+    finalState =
+      await client.getState();
+  } catch {}
+
+  let contacts = [];
+
+  try {
+    contacts =
+      await client.getContacts();
+  } catch (error) {
+    console.error(
+      'getContacts failed:',
+      error
+    );
+  }
+
+  lastContactCount =
+    contacts.length;
+
+  console.error(
+    '\n========================================'
+  );
+
+  console.error(
+    '❌ WHATSAPP CHAT SYNC FAILED'
+  );
+
+  console.error(
+    'State:',
+    finalState
+  );
+
+  console.error(
+    'Chats:',
+    lastChatCount
+  );
+
+  console.error(
+    'Contacts:',
+    lastContactCount
+  );
+
+  console.error(
+    'Groups:',
+    cachedGroups.length
+  );
+
+  console.error(
+    'Account:',
+    client?.info?.wid?._serialized
+  );
+
+  console.error(
+    '========================================\n'
+  );
+
+  addLog(
+    'ERROR',
+    'WhatsApp chat list never populated.',
+    {
+      state:
+        finalState,
+
+      chats:
+        lastChatCount,
+
+      contacts:
+        lastContactCount,
+
+      groups:
+        cachedGroups.length
+    }
+  );
+
+  broadcastWS(
+    'GROUPS_LIST',
+    {
+      groups:
+        cachedGroups
+    }
+  );
+
+  return cachedGroups;
 }
 
-// --- 7. Express Web App & Pure WebSocket Server ---
-const app = express();
-app.use(express.json());
+/* =========================================================
+   WHATSAPP DEBUG
+========================================================= */
 
-const distPath = path.resolve('./dist');
-app.use(express.static(distPath));
+async function printWhatsAppDiagnostics() {
+  console.log(
+    '\n========== WHATSAPP DIAGNOSTICS =========='
+  );
 
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
-const activeSockets = new Set();
+  if (!client) {
+    console.log(
+      'Client: NULL'
+    );
 
-function broadcastWS(event, data) {
-  const jsonStr = JSON.stringify({ event, data, timestamp: new Date().toISOString() });
-  for (const socket of activeSockets) {
-    if (socket.readyState === 1) socket.send(jsonStr);
+    return;
+  }
+
+  try {
+    console.log(
+      'State:',
+      await client.getState()
+    );
+  } catch (error) {
+    console.log(
+      'State: ERROR',
+      error.message
+    );
+  }
+
+  console.log(
+    'Status:',
+    agentStatus
+  );
+
+  console.log(
+    'User:',
+    client.info?.wid?._serialized ||
+      'unknown'
+  );
+
+  console.log(
+    'Push name:',
+    client.info?.pushname ||
+      'unknown'
+  );
+
+  try {
+    const chats =
+      await client.getChats();
+
+    console.log(
+      'Chats:',
+      chats.length
+    );
+  } catch (error) {
+    console.log(
+      'Chats: ERROR',
+      error.message
+    );
+  }
+
+  try {
+    const contacts =
+      await client.getContacts();
+
+    console.log(
+      'Contacts:',
+      contacts.length
+    );
+  } catch (error) {
+    console.log(
+      'Contacts: ERROR',
+      error.message
+    );
+  }
+
+  console.log(
+    'Cached groups:',
+    cachedGroups.length
+  );
+
+  console.log(
+    'Auth directory:',
+    AUTH_DIR
+  );
+
+  console.log(
+    '===========================================\n'
+  );
+}
+
+/* =========================================================
+   INITIALIZE WHATSAPP
+========================================================= */
+
+async function initWhatsApp() {
+  if (
+    client ||
+    initializing
+  ) {
+    addLog(
+      'WARN',
+      'WhatsApp initialization already running or client exists.'
+    );
+
+    return;
+  }
+
+  initializing = true;
+
+  agentStatus =
+    'INITIALIZING';
+
+  broadcastWS(
+    'STATUS_CHANGED',
+    {
+      status:
+        agentStatus
+    }
+  );
+
+  addLog(
+    'INFO',
+    'Initializing WhatsApp Web client...'
+  );
+
+  const chromePath =
+    getChromePath();
+
+  console.log(
+    'Chrome path:',
+    chromePath ||
+      'Puppeteer default'
+  );
+
+  console.log(
+    'WhatsApp auth directory:',
+    AUTH_DIR
+  );
+
+  try {
+    client =
+      new Client({
+        authStrategy:
+          new LocalAuth({
+            dataPath:
+              AUTH_DIR,
+
+            clientId:
+              'main'
+          }),
+
+        puppeteer: {
+          headless:
+            process.env.WHATSAPP_HEADLESS !==
+              'false',
+
+          executablePath:
+            chromePath,
+
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-extensions',
+            '--no-first-run',
+            '--no-default-browser-check'
+          ]
+        }
+      });
+
+    /* -----------------------------------------
+       QR
+    ----------------------------------------- */
+
+    client.on(
+      'qr',
+      async qrRaw => {
+        console.log(
+          '📱 New WhatsApp QR generated'
+        );
+
+        agentStatus =
+          'QR_READY';
+
+        try {
+          qrCodeUrl =
+            await qrcode.toDataURL(
+              qrRaw
+            );
+
+          broadcastWS(
+            'QR_CODE',
+            {
+              qr:
+                qrCodeUrl
+            }
+          );
+        } catch (error) {
+          console.error(
+            'QR generation failed:',
+            error
+          );
+        }
+
+        broadcastWS(
+          'STATUS_CHANGED',
+          {
+            status:
+              agentStatus
+          }
+        );
+
+        addLog(
+          'INFO',
+          'WhatsApp QR code generated. Scan it from your phone.'
+        );
+      }
+    );
+
+    /* -----------------------------------------
+       AUTHENTICATED
+    ----------------------------------------- */
+
+    client.on(
+      'authenticated',
+      () => {
+        console.log(
+          '✅ WhatsApp authenticated'
+        );
+
+        agentStatus =
+          'AUTHENTICATED';
+
+        qrCodeUrl = '';
+
+        broadcastWS(
+          'STATUS_CHANGED',
+          {
+            status:
+              agentStatus
+          }
+        );
+
+        addLog(
+          'INFO',
+          'WhatsApp Web authenticated successfully.'
+        );
+      }
+    );
+
+    /* -----------------------------------------
+       AUTH FAILURE
+    ----------------------------------------- */
+
+    client.on(
+      'auth_failure',
+      error => {
+        console.error(
+          '❌ WhatsApp authentication failure:',
+          error
+        );
+
+        agentStatus =
+          'ERROR';
+
+        broadcastWS(
+          'STATUS_CHANGED',
+          {
+            status:
+              agentStatus,
+
+            error:
+              error?.message ||
+              'Authentication failed'
+          }
+        );
+
+        addLog(
+          'ERROR',
+          `WhatsApp authentication failure: ${
+            error?.message ||
+            'Unknown'
+          }`
+        );
+      }
+    );
+
+    /* -----------------------------------------
+       STATE CHANGES
+    ----------------------------------------- */
+
+    client.on(
+      'change_state',
+      state => {
+        console.log(
+          '🔄 WhatsApp state:',
+          state
+        );
+
+        addLog(
+          'INFO',
+          `WhatsApp state changed: ${state}`,
+          {
+            state
+          }
+        );
+      }
+    );
+
+    /* -----------------------------------------
+       READY
+    ----------------------------------------- */
+
+    client.on(
+      'ready',
+      async () => {
+        console.log(
+          '\n================================'
+        );
+
+        console.log(
+          '✅ WHATSAPP WEB READY'
+        );
+
+        console.log(
+          '================================'
+        );
+
+        agentStatus =
+          'CONNECTED';
+
+        userPhone =
+          client.info?.wid?.user ||
+          '';
+
+        qrCodeUrl = '';
+
+        initializing = false;
+
+        broadcastWS(
+          'STATUS_CHANGED',
+          {
+            status:
+              agentStatus,
+
+            phone:
+              userPhone
+          }
+        );
+
+        addLog(
+          'INFO',
+          `WhatsApp AI Agent connected: +${userPhone}`
+        );
+
+        /*
+         * Print diagnostics first.
+         */
+
+        await printWhatsAppDiagnostics();
+
+        /*
+         * IMPORTANT:
+         * Don't assume chats exist 2 seconds later.
+         * Wait until the chat store is populated.
+         */
+
+        await fetchRealGroups({
+          maxAttempts: 20,
+          delayMs: 3000
+        });
+      }
+    );
+
+    /* -----------------------------------------
+       DISCONNECTED
+    ----------------------------------------- */
+
+    client.on(
+      'disconnected',
+      reason => {
+        console.error(
+          '❌ WhatsApp disconnected:',
+          reason
+        );
+
+        agentStatus =
+          'DISCONNECTED';
+
+        qrCodeUrl = '';
+
+        userPhone = '';
+
+        cachedGroups = [];
+
+        broadcastWS(
+          'STATUS_CHANGED',
+          {
+            status:
+              agentStatus,
+
+            reason
+          }
+        );
+
+        addLog(
+          'ERROR',
+          `WhatsApp disconnected: ${reason}`
+        );
+
+        client = null;
+        initializing = false;
+      }
+    );
+
+    /* -----------------------------------------
+       MESSAGE HANDLER
+    ----------------------------------------- */
+
+    const handleIncomingMsg =
+      async msg => {
+        try {
+          const body =
+            msg.body || '';
+
+          if (!body) {
+            return;
+          }
+
+          /*
+           * Trigger:
+           * @AI
+           * @ai
+           * @EM
+           * @em
+           */
+
+          const isTriggered =
+            /@(ai|em)\b/i.test(
+              body
+            );
+
+          if (!isTriggered) {
+            return;
+          }
+
+          const chat =
+            await msg
+              .getChat()
+              .catch(
+                () => null
+              );
+
+          if (!chat) {
+            return;
+          }
+
+          /*
+           * Group selection.
+           */
+
+          if (
+            chat.isGroup
+          ) {
+            const isAll =
+              selectedGroupIds.includes(
+                'ALL'
+              );
+
+            const isSelected =
+              selectedGroupIds.includes(
+                chat.id._serialized
+              );
+
+            if (
+              !isAll &&
+              !isSelected
+            ) {
+              addLog(
+                'INFO',
+                `Ignoring message from unselected group: ${chat.name}`
+              );
+
+              return;
+            }
+          }
+
+          const senderNumber =
+            msg.author ||
+            msg.from;
+
+          const cleanNumber =
+            rateLimiter.cleanPhoneNumber(
+              senderNumber
+            );
+
+          const contact =
+            await msg
+              .getContact()
+              .catch(
+                () => ({
+                  pushname:
+                    cleanNumber
+                })
+              );
+
+          const pushName =
+            contact.pushname ||
+            contact.name ||
+            cleanNumber;
+
+          addLog(
+            'TRIGGER',
+            `AI trigger from ${pushName}`,
+            {
+              message:
+                body,
+
+              sender:
+                cleanNumber,
+
+              chat:
+                chat.name,
+
+              chatId:
+                chat.id?._serialized
+            }
+          );
+
+          /*
+           * Rate limit.
+           */
+
+          const access =
+            rateLimiter.canAccess(
+              senderNumber
+            );
+
+          if (!access.allowed) {
+            await antiBan.execute(
+              chat,
+              50
+            );
+
+            await msg.reply(
+              `⚠️ *Daily Limit Reached*\n\nYou have used ${access.count}/${access.limit} AI responses today.`
+            );
+
+            broadcastWS(
+              'USAGE_UPDATED',
+              rateLimiter.getUsageStats()
+            );
+
+            return;
+          }
+
+          /*
+           * Typing.
+           */
+
+          addLog(
+            'INFO',
+            `Typing simulation for ${chat.name}`
+          );
+
+          await antiBan.execute(
+            chat,
+            body.length
+          );
+
+          /*
+           * AI.
+           */
+
+          addLog(
+            'INFO',
+            'Generating AI response...'
+          );
+
+          const response =
+            await aiService.generateResponse(
+              body,
+              pushName
+            );
+
+          /*
+           * Record usage.
+           */
+
+          const record =
+            rateLimiter.recordAccess(
+              senderNumber,
+              pushName
+            );
+
+          /*
+           * Send.
+           */
+
+          await msg.reply(
+            response
+          );
+
+          addLog(
+            'AI_REPLY',
+            `AI response sent to ${pushName} (${record.count}/5 today)`,
+            {
+              chat:
+                chat.name,
+
+              reply:
+                response
+            }
+          );
+
+          broadcastWS(
+            'USAGE_UPDATED',
+            rateLimiter.getUsageStats()
+          );
+        } catch (error) {
+          console.error(
+            'Message handler error:',
+            error
+          );
+
+          addLog(
+            'ERROR',
+            `Message handler failed: ${error.message}`,
+            {
+              stack:
+                error.stack
+            }
+          );
+        }
+      };
+
+    client.on(
+      'message',
+      handleIncomingMsg
+    );
+
+    /*
+     * message_create is useful for messages
+     * created by this WhatsApp account.
+     */
+
+    client.on(
+      'message_create',
+      async msg => {
+        if (
+          msg.fromMe
+        ) {
+          await handleIncomingMsg(
+            msg
+          );
+        }
+      }
+    );
+
+    /* -----------------------------------------
+       INITIALIZE
+    ----------------------------------------- */
+
+    await client.initialize();
+  } catch (error) {
+    console.error(
+      '❌ WhatsApp initialization failed:',
+      error
+    );
+
+    addLog(
+      'ERROR',
+      `WhatsApp initialization failed: ${error.message}`,
+      {
+        stack:
+          error.stack
+      }
+    );
+
+    agentStatus =
+      'ERROR';
+
+    client = null;
+    initializing = false;
+
+    broadcastWS(
+      'STATUS_CHANGED',
+      {
+        status:
+          agentStatus,
+
+        error:
+          error.message
+      }
+    );
   }
 }
 
-wss.on('connection', async (ws) => {
-  activeSockets.add(ws);
+/* =========================================================
+   EXPRESS
+========================================================= */
 
-  const groups = await fetchRealGroups();
+const app =
+  express();
 
-  // Send current state on WebSocket connection
-  ws.send(JSON.stringify({
-    event: 'INITIAL_STATE',
-    data: {
-      status: {
-        status: agentStatus,
-        qrCodeUrl,
-        userPhone,
-        mode: aiService.mode,
-        antiBan: antiBan,
-        logs: logs.slice(0, 50)
-      },
-      usage: rateLimiter.getUsageStats(),
-      groups,
-      selectedGroupIds
-    }
-  }));
+app.use(
+  express.json()
+);
 
-  // Handle incoming WebSocket actions from Frontend Dashboard
-  ws.on('message', async (messageBuffer) => {
-    try {
-      const { action, payload } = JSON.parse(messageBuffer.toString());
+if (
+  fs.existsSync(DIST_DIR)
+) {
+  app.use(
+    express.static(
+      DIST_DIR
+    )
+  );
+}
 
-      if (action === 'CONNECT') {
-        initWhatsApp();
-      } else if (action === 'DISCONNECT') {
-        if (client) {
-          await client.logout().catch(() => {});
-          agentStatus = 'DISCONNECTED';
-          client = null;
-          broadcastWS('STATUS_CHANGED', { status: agentStatus });
-          addLog('INFO', 'Logged out from WhatsApp Web.');
-        }
-      } else if (action === 'UPDATE_SETTINGS') {
-        if (payload.aiMode) aiService.mode = payload.aiMode;
-        if (payload.maxDailyLimit) rateLimiter.setDailyLimit(payload.maxDailyLimit);
-        broadcastWS('SETTINGS_UPDATED', { mode: aiService.mode, maxDailyLimit: rateLimiter.getUsageStats().maxDailyLimit });
-        addLog('INFO', 'Updated AI & Rate limit settings.');
-      } else if (action === 'FETCH_GROUPS') {
-        const currentGroups = await fetchRealGroups();
-        ws.send(JSON.stringify({ event: 'GROUPS_LIST', data: { groups: currentGroups } }));
-      } else if (action === 'SET_SELECTED_GROUPS') {
-        if (Array.isArray(payload.groups)) {
-          selectedGroupIds = payload.groups;
-          saveSelectedGroups(selectedGroupIds);
-          broadcastWS('SELECTED_GROUPS_UPDATED', { selectedGroupIds });
-          addLog('INFO', `Updated target WhatsApp groups selection (${selectedGroupIds.length} active).`);
-        }
-      }
-    } catch (e) {}
+/* =========================================================
+   HTTP SERVER
+========================================================= */
+
+const server =
+  http.createServer(
+    app
+  );
+
+/* =========================================================
+   WEBSOCKET
+========================================================= */
+
+const wss =
+  new WebSocketServer({
+    server
   });
 
-  ws.on('close', () => activeSockets.delete(ws));
-});
+const activeSockets =
+  new Set();
 
-// SPA fallback for frontend
-app.get('*', (req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+function broadcastWS(
+  event,
+  data
+) {
+  const message =
+    JSON.stringify({
+      event,
 
-server.listen(PORT, () => {
-  console.log(`\n==================================================`);
-  console.log(`🚀 WhatsApp Web AI Agent Server & Dashboard Live!`);
-  console.log(`🌐 Open Dashboard: http://localhost:${PORT}`);
-  console.log(`==================================================\n`);
+      data,
 
-  initWhatsApp();
-});
+      timestamp:
+        new Date().toISOString()
+    });
+
+  for (
+    const socket of activeSockets
+  ) {
+    if (
+      socket.readyState ===
+      1
+    ) {
+      try {
+        socket.send(
+          message
+        );
+      } catch (error) {
+        console.error(
+          'WebSocket send failed:',
+          error
+        );
+      }
+    }
+  }
+}
+
+/* =========================================================
+   WEBSOCKET CONNECTION
+========================================================= */
+
+wss.on(
+  'connection',
+  async ws => {
+    activeSockets.add(ws);
+
+    console.log(
+      '🔌 Dashboard WebSocket connected'
+    );
+
+    /*
+     * Don't block initial state on getChats().
+     * Send cached groups immediately.
+     */
+
+    ws.send(
+      JSON.stringify({
+        event:
+          'INITIAL_STATE',
+
+        data: {
+          status: {
+            status:
+              agentStatus,
+
+            qrCodeUrl,
+
+            userPhone,
+
+            mode:
+              aiService.mode,
+
+            antiBan: {
+              enabled:
+                antiBan.enableTyping,
+
+              minDelayMs:
+                antiBan.minDelayMs,
+
+              maxDelayMs:
+                antiBan.maxDelayMs
+            },
+
+            logs:
+              logs.slice(
+                0,
+                50
+              )
+          },
+
+          usage:
+            rateLimiter.getUsageStats(),
+
+          groups:
+            cachedGroups,
+
+          selectedGroupIds
+        }
+      })
+    );
+
+    /*
+     * If already connected,
+     * refresh groups in background.
+     */
+
+    if (
+      client &&
+      agentStatus ===
+        'CONNECTED'
+    ) {
+      fetchRealGroups({
+        maxAttempts: 3,
+        delayMs: 2000
+      }).catch(
+        error => {
+          console.error(
+            'Background group refresh failed:',
+            error
+          );
+        }
+      );
+    }
+
+    ws.on(
+      'message',
+      async buffer => {
+        try {
+          const message =
+            JSON.parse(
+              buffer.toString()
+            );
+
+          const action =
+            message.action;
+
+          const payload =
+            message.payload || {};
+
+          console.log(
+            'Dashboard action:',
+            action
+          );
+
+          /* -----------------------------------
+             CONNECT
+          ----------------------------------- */
+
+          if (
+            action ===
+            'CONNECT'
+          ) {
+            await initWhatsApp();
+          }
+
+          /* -----------------------------------
+             DISCONNECT
+          ----------------------------------- */
+
+          else if (
+            action ===
+            'DISCONNECT'
+          ) {
+            if (client) {
+              try {
+                await client.logout();
+              } catch (error) {
+                console.warn(
+                  'Logout failed:',
+                  error.message
+                );
+              }
+
+              client = null;
+            }
+
+            agentStatus =
+              'DISCONNECTED';
+
+            qrCodeUrl = '';
+
+            userPhone = '';
+
+            cachedGroups = [];
+
+            broadcastWS(
+              'STATUS_CHANGED',
+              {
+                status:
+                  agentStatus
+              }
+            );
+
+            addLog(
+              'INFO',
+              'Logged out from WhatsApp Web.'
+            );
+          }
+
+          /* -----------------------------------
+             FETCH GROUPS
+          ----------------------------------- */
+
+          else if (
+            action ===
+            'FETCH_GROUPS'
+          ) {
+            console.log(
+              'Manual group fetch requested'
+            );
+
+            if (
+              !client
+            ) {
+              ws.send(
+                JSON.stringify({
+                  event:
+                    'GROUPS_ERROR',
+
+                  data: {
+                    error:
+                      'WhatsApp client is not initialized.'
+                  }
+                })
+              );
+
+              return;
+            }
+
+            const groups =
+              await fetchRealGroups({
+                maxAttempts: 10,
+                delayMs: 2000,
+                force: true
+              });
+
+            ws.send(
+              JSON.stringify({
+                event:
+                  'GROUPS_LIST',
+
+                data: {
+                  groups
+                }
+              })
+            );
+          }
+
+          /* -----------------------------------
+             SET SELECTED GROUPS
+          ----------------------------------- */
+
+          else if (
+            action ===
+            'SET_SELECTED_GROUPS'
+          ) {
+            if (
+              Array.isArray(
+                payload.groups
+              )
+            ) {
+              selectedGroupIds =
+                payload.groups;
+
+              saveSelectedGroups(
+                selectedGroupIds
+              );
+
+              broadcastWS(
+                'SELECTED_GROUPS_UPDATED',
+                {
+                  selectedGroupIds
+                }
+              );
+
+              addLog(
+                'INFO',
+                `Updated selected groups: ${selectedGroupIds.length}`
+              );
+            }
+          }
+
+          /* -----------------------------------
+             SETTINGS
+          ----------------------------------- */
+
+          else if (
+            action ===
+            'UPDATE_SETTINGS'
+          ) {
+            if (
+              payload.aiMode
+            ) {
+              aiService.mode =
+                payload.aiMode;
+            }
+
+            if (
+              payload.maxDailyLimit
+            ) {
+              rateLimiter.setDailyLimit(
+                payload.maxDailyLimit
+              );
+            }
+
+            broadcastWS(
+              'SETTINGS_UPDATED',
+              {
+                mode:
+                  aiService.mode,
+
+                maxDailyLimit:
+                  rateLimiter.getUsageStats()
+                    .maxDailyLimit
+              }
+            );
+          }
+
+          /* -----------------------------------
+             DEBUG
+          ----------------------------------- */
+
+          else if (
+            action ===
+            'DEBUG_WHATSAPP'
+          ) {
+            await printWhatsAppDiagnostics();
+
+            ws.send(
+              JSON.stringify({
+                event:
+                  'WHATSAPP_DEBUG',
+
+                data: {
+                  status:
+                    agentStatus,
+
+                  userPhone,
+
+                  chats:
+                    lastChatCount,
+
+                  contacts:
+                    lastContactCount,
+
+                  groups:
+                    cachedGroups.length,
+
+                  authDir:
+                    AUTH_DIR
+                }
+              })
+            );
+          }
+        } catch (error) {
+          console.error(
+            'WebSocket message error:',
+            error
+          );
+
+          ws.send(
+            JSON.stringify({
+              event:
+                'ERROR',
+
+              data: {
+                error:
+                  error.message
+              }
+            })
+          );
+        }
+      }
+    );
+
+    ws.on(
+      'close',
+      () => {
+        activeSockets.delete(
+          ws
+        );
+
+        console.log(
+          '🔌 Dashboard WebSocket disconnected'
+        );
+      }
+    );
+
+    ws.on(
+      'error',
+      error => {
+        console.error(
+          'WebSocket error:',
+          error
+        );
+
+        activeSockets.delete(
+          ws
+        );
+      }
+    );
+  }
+);
+
+/* =========================================================
+   HEALTH API
+========================================================= */
+
+app.get(
+  '/api/health',
+  async (req, res) => {
+    let state = null;
+
+    if (client) {
+      try {
+        state =
+          await client.getState();
+      } catch {}
+    }
+
+    res.json({
+      ok: true,
+
+      server:
+        'online',
+
+      whatsapp: {
+        status:
+          agentStatus,
+
+        state,
+
+        connected:
+          Boolean(client),
+
+        phone:
+          userPhone,
+
+        chats:
+          lastChatCount,
+
+        contacts:
+          lastContactCount,
+
+        groups:
+          cachedGroups.length
+      },
+
+      timestamp:
+        new Date().toISOString()
+    });
+  }
+);
+
+/* =========================================================
+   GROUP API
+========================================================= */
+
+app.get(
+  '/api/groups',
+  async (req, res) => {
+    try {
+      const groups =
+        client &&
+        agentStatus ===
+          'CONNECTED'
+          ? await fetchRealGroups({
+              maxAttempts: 5,
+              delayMs: 1500
+            })
+          : cachedGroups;
+
+      res.json({
+        ok: true,
+
+        groups,
+
+        count:
+          groups.length,
+
+        selectedGroupIds
+      });
+    } catch (error) {
+      res.status(500).json({
+        ok: false,
+
+        error:
+          error.message,
+
+        groups:
+          cachedGroups
+      });
+    }
+  }
+);
+
+/* =========================================================
+   USAGE API
+========================================================= */
+
+app.get(
+  '/api/usage',
+  (req, res) => {
+    res.json(
+      rateLimiter.getUsageStats()
+    );
+  }
+);
+
+/* =========================================================
+   SPA FALLBACK
+========================================================= */
+
+if (
+  fs.existsSync(
+    path.join(
+      DIST_DIR,
+      'index.html'
+    )
+  )
+) {
+  app.get(
+    '*',
+    (req, res) => {
+      res.sendFile(
+        path.join(
+          DIST_DIR,
+          'index.html'
+        )
+      );
+    }
+  );
+}
+
+/* =========================================================
+   SERVER START
+========================================================= */
+
+server.listen(
+  PORT,
+  () => {
+    console.log(
+      '\n=================================================='
+    );
+
+    console.log(
+      '🚀 WhatsApp Web AI Agent Server'
+    );
+
+    console.log(
+      `🌐 Port: ${PORT}`
+    );
+
+    console.log(
+      `📁 Auth: ${AUTH_DIR}`
+    );
+
+    console.log(
+      `📁 Data: ${DATA_DIR}`
+    );
+
+    console.log(
+      '==================================================\n'
+    );
+
+    /*
+     * Automatically initialize WhatsApp.
+     */
+
+    initWhatsApp().catch(
+      error => {
+        console.error(
+          'Startup WhatsApp error:',
+          error
+        );
+      }
+    );
+  }
+);
+
+/* =========================================================
+   PROCESS ERROR HANDLING
+========================================================= */
+
+process.on(
+  'uncaughtException',
+  error => {
+    console.error(
+      'UNCAUGHT EXCEPTION:',
+      error
+    );
+
+    addLog(
+      'ERROR',
+      `Uncaught exception: ${error.message}`,
+      {
+        stack:
+          error.stack
+      }
+    );
+  }
+);
+
+process.on(
+  'unhandledRejection',
+  reason => {
+    console.error(
+      'UNHANDLED REJECTION:',
+      reason
+    );
+
+    addLog(
+      'ERROR',
+      `Unhandled rejection: ${reason?.message || reason}`
+    );
+  }
+);
+
+process.on(
+  'SIGTERM',
+  async () => {
+    console.log(
+      'SIGTERM received'
+    );
+
+    try {
+      if (client) {
+        await client.destroy();
+      }
+    } catch (error) {
+      console.error(
+        'WhatsApp destroy failed:',
+        error
+      );
+    }
+
+    process.exit(0);
+  }
+);
+
+process.on(
+  'SIGINT',
+  async () => {
+    console.log(
+      'SIGINT received'
+    );
+
+    try {
+      if (client) {
+        await client.destroy();
+      }
+    } catch (error) {
+      console.error(
+        'WhatsApp destroy failed:',
+        error
+      );
+    }
+
+    process.exit(0);
+  }
+);
