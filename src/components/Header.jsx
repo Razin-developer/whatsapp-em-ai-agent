@@ -1,8 +1,16 @@
-import React from 'react';
-import { Bot, QrCode, LogOut, ShieldCheck, Zap, Radio } from 'lucide-react';
+import React, { useState } from 'react';
+import { Bot, QrCode, LogOut, ShieldCheck, Zap, Radio, Server, CheckCircle } from 'lucide-react';
 
-export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR }) {
+export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR, runnerUrl, onSaveRunnerUrl, wsConnected }) {
   const { status = 'DISCONNECTED', userPhone = '', qrCodeUrl = '' } = statusInfo || {};
+  const [editingUrl, setEditingUrl] = useState(false);
+  const [tempUrl, setTempUrl] = useState(runnerUrl || 'http://localhost:3001');
+
+  const handleUrlSubmit = (e) => {
+    e.preventDefault();
+    onSaveRunnerUrl(tempUrl);
+    setEditingUrl(false);
+  };
 
   const getStatusBadge = () => {
     switch (status) {
@@ -53,10 +61,38 @@ export default function Header({ statusInfo, onConnect, onDisconnect, onOpenQR }
                 HackAI SDK
               </span>
             </div>
-            <p className="text-xs text-gray-400 flex items-center gap-1.5 mt-0.5">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              Anti-Ban System • 5 Responses/Day Limit
-            </p>
+            <div className="flex items-center gap-3 text-xs text-gray-400 mt-0.5">
+              <span className="flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                Anti-Ban System • 5/Day Limit
+              </span>
+
+              {/* Runner Endpoint Selector */}
+              {editingUrl ? (
+                <form onSubmit={handleUrlSubmit} className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={tempUrl}
+                    onChange={(e) => setTempUrl(e.target.value)}
+                    className="bg-gray-900 border border-emerald-500/50 rounded px-2 py-0.5 text-[11px] text-white font-mono"
+                    placeholder="http://localhost:3001"
+                  />
+                  <button type="submit" className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold">Save</button>
+                </form>
+              ) : (
+                <button
+                  onClick={() => setEditingUrl(true)}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-gray-900 border border-gray-800 hover:border-gray-700 text-[11px] text-gray-300 font-mono"
+                  title="Click to edit Agent Runner Server URL"
+                >
+                  <Server className="w-3 h-3 text-blue-400" />
+                  <span>Runner: <b>{runnerUrl}</b></span>
+                  <span className="text-[9px] px-1 rounded bg-gray-800 text-emerald-400 ml-1">
+                    {wsConnected ? 'WebSocket' : 'HTTP Polling'}
+                  </span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
 

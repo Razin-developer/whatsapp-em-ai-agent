@@ -8,59 +8,76 @@ import TestSimulatorModal from './components/TestSimulatorModal.jsx';
 import { Play, Sparkles, RefreshCw, Zap, Shield, HelpCircle } from 'lucide-react';
 
 export default function App() {
-  const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'SHORT_HUMAN' });
+  const [runnerUrl, setRunnerUrl] = useState(() => {
+    return localStorage.getItem('EM_AGENT_RUNNER_URL') || (window.location.port === '5173' || window.location.host.includes('vercel.app') ? 'http://localhost:3001' : window.location.origin);
+  });
+  const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
   const [logs, setLogs] = useState([]);
   const [showQR, setShowQR] = useState(false);
   const [showSimulator, setShowSimulator] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
 
-  const API_BASE = window.location.origin.includes('5173') ? 'http://localhost:3001' : window.location.origin;
+  const saveRunnerUrl = (url) => {
+    const clean = url.replace(/\/$/, '');
+    setRunnerUrl(clean);
+    localStorage.setItem('EM_AGENT_RUNNER_URL', clean);
+  };
 
-  // Initial API fetch & WebSocket listener setup
-  useEffect(() => {
-    fetchInitialData();
-
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsHost = window.location.origin.includes('5173') ? 'localhost:3001' : window.location.host;
-    const wsUrl = `${wsProtocol}//${wsHost}`;
-
-    let socket = null;
+  const fetchStatus = async () => {
     try {
-      socket = new WebSocket(wsUrl);
-
-      socket.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          handleWebSocketEvent(payload);
-        } catch (e) {
-          console.error('Failed to parse WebSocket message:', e);
-        }
-      };
-
-      socket.onerror = (err) => console.log('WebSocket connection info:', err);
-    } catch (e) {
-      console.log('WS init error:', e);
-    }
-
-    return () => {
-      if (socket) socket.close();
-    };
-  }, []);
-
-  const fetchInitialData = async () => {
-    try {
-      const statusRes = await fetch(`${API_BASE}/api/status`);
+      const statusRes = await fetch(`${runnerUrl}/api/status`);
       const statusJson = await statusRes.json();
       if (statusJson.success) {
         setStatusInfo(statusJson.agent);
         setUsageData(statusJson.usage);
         if (statusJson.agent.logs) setLogs(statusJson.agent.logs);
         if (statusJson.agent.status === 'QR_READY') setShowQR(true);
+        if (statusJson.agent.status === 'CONNECTED') setShowQR(false);
       }
     } catch (err) {
-      console.error('Error fetching initial status:', err);
+      // Runner disconnected or unreachable
     }
   };
+
+  // Setup WebSocket connection with Automatic HTTP Polling Fallback for Vercel
+  useEffect(() => {
+    fetchStatus();
+
+    // 1. HTTP Polling fallback timer (Every 2.5s for seamless Vercel updates)
+    const pollInterval = setInterval(() => {
+      fetchStatus();
+    }, 2500);
+
+    // 2. Try WebSocket for real-time streaming when supported
+    let socket = null;
+    try {
+      const wsProtocol = runnerUrl.startsWith('https') ? 'wss:' : 'ws:';
+      const cleanHost = runnerUrl.replace(/^https?:\/\//, '');
+      const wsUrl = `${wsProtocol}//${cleanHost}`;
+
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => setWsConnected(true);
+      socket.onclose = () => setWsConnected(false);
+      socket.onerror = () => setWsConnected(false);
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          handleWebSocketEvent(payload);
+        } catch (e) {}
+      };
+    } catch (e) {
+      setWsConnected(false);
+    }
+
+    return () => {
+      clearInterval(pollInterval);
+      if (socket) socket.close();
+    };
+  }, [runnerUrl]);
+
 
   const handleWebSocketEvent = (payload) => {
     const { event, data } = payload;
@@ -86,7 +103,7 @@ export default function App() {
   const handleConnect = async () => {
     try {
       setStatusInfo((prev) => ({ ...prev, status: 'INITIALIZING' }));
-      await fetch(`${API_BASE}/api/connect`, { method: 'POST' });
+      await fetch(`${runnerUrl}/api/connect`, { method: 'POST' });
     } catch (err) {
       console.error('Error connecting WhatsApp:', err);
     }
@@ -94,7 +111,7 @@ export default function App() {
 
   const handleDisconnect = async () => {
     try {
-      await fetch(`${API_BASE}/api/disconnect`, { method: 'POST' });
+      await fetch(`${runnerUrl}/api/disconnect`, { method: 'POST' });
       setStatusInfo((prev) => ({ ...prev, status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '' }));
       setShowQR(false);
     } catch (err) {
@@ -104,7 +121,7 @@ export default function App() {
 
   const handleSaveSettings = async (newSettings) => {
     try {
-      const res = await fetch(`${API_BASE}/api/settings`, {
+      const res = await fetch(`${runnerUrl}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newSettings)
@@ -121,7 +138,7 @@ export default function App() {
 
   const handleRunTestTrigger = async (testData) => {
     try {
-      await fetch(`${API_BASE}/api/test-trigger`, {
+      await fetch(`${runnerUrl}/api/test-trigger`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(testData)
@@ -141,6 +158,9 @@ export default function App() {
         onConnect={handleConnect}
         onDisconnect={handleDisconnect}
         onOpenQR={() => setShowQR(true)}
+        runnerUrl={runnerUrl}
+        onSaveRunnerUrl={saveRunnerUrl}
+        wsConnected={wsConnected}
       />
 
       {/* Main Content Area */}
