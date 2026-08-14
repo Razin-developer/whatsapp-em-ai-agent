@@ -192,7 +192,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={fetchInitialData}
+              onClick={fetchStatus}
               className="p-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 transition"
               title="Refresh Dashboard"
             >
