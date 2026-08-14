@@ -2,21 +2,20 @@
 node_modules/
 .pnpm-store/
 
-# WhatsApp Auth Session & Storage
-.wwebjs_auth/
-.wwebjs_cache/
-data/usage.json
-
-# Production Build
+# Build output
 dist/
+dist-ssr/
+*.local
 
-# Environment Variables
+# Environment variables
 .env
 .env.local
 
-# Logs & System
+# WhatsApp session data & logs
+data/
+.wwebjs_auth/
 *.log
-npm-debug.log*
-pnpm-debug.log*
 
-.vercel
+# System & IDE
+.DS_Store
+Thumbs.db

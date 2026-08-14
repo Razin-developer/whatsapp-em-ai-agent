@@ -449,7 +449,7 @@ class AIService {
 
   detectDesiredMode(prompt) {
     if (!prompt) return 'SHORT_HUMAN';
-    const clean = prompt.replace(/@(ai|em)/gi, '').trim().toLowerCase();
+    const clean = prompt.replace(/@ai/gi, '').trim().toLowerCase();
     const highDetailKeywords = ['detail', 'explain', 'step by step', 'guide', 'code', 'tutorial', 'compare', 'how to', 'why'];
     return (highDetailKeywords.some(k => clean.includes(k)) || clean.length > 140) ? 'HIGH_DETAIL' : 'SHORT_HUMAN';
   }
@@ -681,6 +681,15 @@ async function fetchRealGroups(
     );
 
     return cachedGroups;
+  }
+
+  if (client.pupPage) {
+    try {
+      await client.pupPage.waitForFunction(
+        () => window.Store && window.Store.Chat && typeof window.Store.Chat.getModelsArray === 'function',
+        { timeout: 15000 }
+      ).catch(() => {});
+    } catch (e) {}
   }
 
   for (
@@ -1406,13 +1415,13 @@ async function initWhatsApp() {
           /*
            * Trigger:
            * @AI
+           * @Ai
+           * @aI
            * @ai
-           * @EM
-           * @em
            */
 
           const isTriggered =
-            /@(ai|em)\b/i.test(
+            /@ai\b/i.test(
               body
             );
 

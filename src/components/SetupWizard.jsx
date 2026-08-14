@@ -28,7 +28,7 @@ export default function SetupWizard({
           WhatsApp AI Agent Setup
         </h1>
         <p className="text-xs text-gray-400 max-w-md mx-auto">
-          Connect your WhatsApp account, choose target groups, and activate auto-responses for <b>@AI</b> and <b>@EM</b> mentions.
+          Connect your WhatsApp account, choose target groups, and activate auto-responses for <b>@AI</b> mentions.
         </p>
       </div>
 

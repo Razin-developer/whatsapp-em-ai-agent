@@ -201,10 +201,10 @@ export default function App() {
                 </div>
                 <div>
                   <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                    Trigger Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@AI</code> or <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@EM</code> (Case Insensitive)
+                    Trigger Rule: <code className="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-mono text-xs">@AI</code> (Case Insensitive)
                   </h2>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    Responds in selected WhatsApp group or direct chats when anyone (including yourself) types <code className="text-emerald-400">@AI</code>, <code className="text-emerald-400">@Ai</code>, <code className="text-emerald-400">@ai</code>, or <code className="text-emerald-400">@EM</code>.
+                    Responds in selected WhatsApp group or direct chats when anyone (including yourself) types <code className="text-emerald-400">@AI</code>, <code className="text-emerald-400">@Ai</code>, <code className="text-emerald-400">@aI</code>, or <code className="text-emerald-400">@ai</code>.
                   </p>
                 </div>
               </div>

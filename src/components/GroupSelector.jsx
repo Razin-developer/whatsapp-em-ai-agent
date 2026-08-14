@@ -88,7 +88,7 @@ export default function GroupSelector({ groups = [], selectedGroupIds = [], onTo
           <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
           Active in <b>{selectedGroupIds.includes('ALL') ? 'All Groups' : `${selectedGroupIds.length} Selected Groups`}</b>
         </span>
-        <span className="text-gray-500">Triggers: @AI, @Ai, @aI, @ai, @EM</span>
+        <span className="text-gray-500">Triggers: @AI, @Ai, @aI, @ai</span>
       </div>
 
     </div>
