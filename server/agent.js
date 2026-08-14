@@ -1,3 +1,4 @@
+import fs from 'fs';
 import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth } = pkg;
 import qrcode from 'qrcode';
@@ -57,11 +58,21 @@ class WhatsAppAgent {
     this.broadcast('STATUS_CHANGED', { status: this.status });
     this.addLog('INFO', 'Initializing WhatsApp Web Client with Playwright engine...');
 
+    // Auto-detect system Chrome path on Windows if installed
+    let chromePath = undefined;
+    if (process.platform === 'win32') {
+      const standardPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+      const x86Path = 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe';
+      if (fs.existsSync(standardPath)) chromePath = standardPath;
+      else if (fs.existsSync(x86Path)) chromePath = x86Path;
+    }
+
     try {
       this.client = new Client({
         authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
         puppeteer: {
           headless: true,
+          executablePath: chromePath,
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -73,6 +84,7 @@ class WhatsAppAgent {
           ]
         }
       });
+
 
       this.setupHandlers();
       await this.client.initialize();
