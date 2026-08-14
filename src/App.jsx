@@ -9,7 +9,10 @@ import { Play, Sparkles, RefreshCw, Zap, Shield, HelpCircle } from 'lucide-react
 
 export default function App() {
   const [runnerUrl, setRunnerUrl] = useState(() => {
-    return localStorage.getItem('EM_AGENT_RUNNER_URL') || (window.location.port === '5173' || window.location.host.includes('vercel.app') ? 'http://localhost:3001' : window.location.origin);
+    const saved = localStorage.getItem('EM_AGENT_RUNNER_URL');
+    if (saved) return saved;
+    // Default to relative path (empty string) on Vercel to use Vercel Serverless API, or localhost when developing locally
+    return window.location.port === '5173' ? 'http://localhost:3001' : '';
   });
   const [statusInfo, setStatusInfo] = useState({ status: 'DISCONNECTED', userPhone: '', qrCodeUrl: '', mode: 'AUTO' });
   const [usageData, setUsageData] = useState({ users: [], maxDailyLimit: 5, totalUsers: 0, activeToday: 0 });
@@ -51,25 +54,27 @@ export default function App() {
 
     // 2. Try WebSocket for real-time streaming when supported
     let socket = null;
-    try {
-      const wsProtocol = runnerUrl.startsWith('https') ? 'wss:' : 'ws:';
-      const cleanHost = runnerUrl.replace(/^https?:\/\//, '');
-      const wsUrl = `${wsProtocol}//${cleanHost}`;
+    if (runnerUrl) {
+      try {
+        const wsProtocol = runnerUrl.startsWith('https') ? 'wss:' : 'ws:';
+        const cleanHost = runnerUrl.replace(/^https?:\/\//, '');
+        const wsUrl = `${wsProtocol}//${cleanHost}`;
 
-      socket = new WebSocket(wsUrl);
+        socket = new WebSocket(wsUrl);
 
-      socket.onopen = () => setWsConnected(true);
-      socket.onclose = () => setWsConnected(false);
-      socket.onerror = () => setWsConnected(false);
+        socket.onopen = () => setWsConnected(true);
+        socket.onclose = () => setWsConnected(false);
+        socket.onerror = () => setWsConnected(false);
 
-      socket.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          handleWebSocketEvent(payload);
-        } catch (e) {}
-      };
-    } catch (e) {
-      setWsConnected(false);
+        socket.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            handleWebSocketEvent(payload);
+          } catch (e) {}
+        };
+      } catch (e) {
+        setWsConnected(false);
+      }
     }
 
     return () => {
