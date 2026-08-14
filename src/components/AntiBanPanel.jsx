@@ -47,40 +47,58 @@ export default function AntiBanPanel({ settings, onSaveSettings }) {
             Controls AI output length to match human chatting habits or detailed explanations.
           </p>
 
-          <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="grid grid-cols-3 gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setAiMode('AUTO')}
+              className={`p-2.5 rounded-xl border text-left transition ${
+                aiMode === 'AUTO'
+                  ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 font-bold'
+                  : 'bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-700'
+              }`}
+            >
+              <div className="flex items-center gap-1">
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                Auto-Detect
+              </div>
+              <p className="text-[10px] font-normal text-gray-400 mt-1">
+                Smart auto-switch based on question intent.
+              </p>
+            </button>
+
             <button
               type="button"
               onClick={() => setAiMode('SHORT_HUMAN')}
-              className={`p-3 rounded-xl border text-left transition ${
+              className={`p-2.5 rounded-xl border text-left transition ${
                 aiMode === 'SHORT_HUMAN'
                   ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 font-bold'
                   : 'bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-700'
               }`}
             >
-              <div className="flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5" />
-                Short & Human
+              <div className="flex items-center gap-1">
+                <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                Short Human
               </div>
               <p className="text-[10px] font-normal text-gray-400 mt-1">
-                Concise 1-3 sentences like a real friend messaging on WhatsApp.
+                Concise 1-3 short sentences like a real chatter.
               </p>
             </button>
 
             <button
               type="button"
               onClick={() => setAiMode('HIGH_DETAIL')}
-              className={`p-3 rounded-xl border text-left transition ${
+              className={`p-2.5 rounded-xl border text-left transition ${
                 aiMode === 'HIGH_DETAIL'
                   ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 font-bold'
                   : 'bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-700'
               }`}
             >
-              <div className="flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5" />
-                High & Detailed
+              <div className="flex items-center gap-1">
+                <Sliders className="w-3.5 h-3.5 text-blue-400" />
+                High Detail
               </div>
               <p className="text-[10px] font-normal text-gray-400 mt-1">
-                Formatted comprehensive response with key bullet points.
+                Formatted comprehensive response breakdown.
               </p>
             </button>
           </div>

@@ -10,12 +10,12 @@ try {
 
 class AIService {
   constructor() {
-    this.mode = process.env.AI_RESPONSE_MODE || 'SHORT_HUMAN'; // SHORT_HUMAN | HIGH_DETAIL
+    this.mode = process.env.AI_RESPONSE_MODE || 'AUTO'; // AUTO | SHORT_HUMAN | HIGH_DETAIL
     this.apiKey = process.env.HACKAI_API_KEY || process.env.AI_API_KEY || '';
   }
 
   setMode(newMode) {
-    if (['SHORT_HUMAN', 'HIGH_DETAIL'].includes(newMode)) {
+    if (['AUTO', 'SHORT_HUMAN', 'HIGH_DETAIL'].includes(newMode)) {
       this.mode = newMode;
       console.log(`[AI Service] Mode updated to: ${newMode}`);
     }
@@ -25,18 +25,39 @@ class AIService {
     return this.mode;
   }
 
+  detectDesiredMode(prompt) {
+    if (!prompt || typeof prompt !== 'string') return 'SHORT_HUMAN';
+    const cleanPrompt = prompt.replace(/@EM|@\w+/gi, '').trim().toLowerCase();
+
+    // High detail triggers & keywords
+    const highDetailKeywords = [
+      'detail', 'detailed', 'explain', 'step by step', 'elaborate', 'comprehensive',
+      'full guide', 'code', 'tutorial', 'compare', 'pros and cons', 'deep dive',
+      'list all', 'write a', 'essay', 'summarize', 'documentation', 'breakdown',
+      'how to', 'why does', 'algorithm', 'recipe'
+    ];
+
+    const demandsDetail = highDetailKeywords.some(keyword => cleanPrompt.includes(keyword)) || cleanPrompt.length > 140;
+    return demandsDetail ? 'HIGH_DETAIL' : 'SHORT_HUMAN';
+  }
+
   async generateResponse(prompt, senderName = 'Friend', overrideMode = null) {
-    const currentMode = overrideMode || this.mode;
+    // Determine target mode: if current mode is 'AUTO' (or null), intelligently detect from query!
+    let effectiveMode = overrideMode || this.mode;
+    if (!effectiveMode || effectiveMode === 'AUTO') {
+      effectiveMode = this.detectDesiredMode(prompt);
+    }
     
     let systemInstruction = "";
-    if (currentMode === 'SHORT_HUMAN') {
+    if (effectiveMode === 'SHORT_HUMAN') {
       systemInstruction = `You are a friendly, smart WhatsApp AI Assistant. 
-Keep your response VERY SHORT, natural, informal, and human-like (maximum 1 to 3 short sentences). 
+The user is asking a simple query. Keep your response VERY SHORT, natural, informal, and human-like (maximum 1 to 3 short sentences). 
 Avoid corporate speak, robotic greetings, or long explanations unless specifically requested. Speak naturally like a knowledgeable friend chatting on WhatsApp.`;
     } else {
-      systemInstruction = `You are a helpful and comprehensive WhatsApp AI Assistant.
-Provide a clear, detailed, well-structured response with key points, formatting, and helpful advice.`;
+      systemInstruction = `You are a helpful, expert WhatsApp AI Assistant.
+The user is requesting detailed information or an explanation. Provide a comprehensive, well-structured, high-detail response formatted cleanly with WhatsApp markdown (*bold*, bullet points •, and sections).`;
     }
+
 
     try {
       // 1. Try using @razinmohammedpt/hackai-sdk if imported and initialized
@@ -76,22 +97,22 @@ Provide a clear, detailed, well-structured response with key points, formatting,
               { role: 'system', content: systemInstruction },
               { role: 'user', content: prompt }
             ],
-            max_tokens: currentMode === 'SHORT_HUMAN' ? 120 : 500
+            max_tokens: effectiveMode === 'SHORT_HUMAN' ? 120 : 600
           })
         });
 
         if (fetchRes.ok) {
           const data = await fetchRes.json();
-          return data.choices?.[0]?.message?.content?.trim() || this.getSmartFallbackResponse(prompt, currentMode);
+          return data.choices?.[0]?.message?.content?.trim() || this.getSmartFallbackResponse(prompt, effectiveMode, senderName);
         }
       }
 
       // 3. Built-in Smart Conversational Engine Fallback (Works zero-config offline/online)
-      return this.getSmartFallbackResponse(prompt, currentMode, senderName);
+      return this.getSmartFallbackResponse(prompt, effectiveMode, senderName);
 
     } catch (error) {
       console.error('[AI Service Error]:', error);
-      return this.getSmartFallbackResponse(prompt, currentMode, senderName);
+      return this.getSmartFallbackResponse(prompt, effectiveMode, senderName);
     }
   }
 

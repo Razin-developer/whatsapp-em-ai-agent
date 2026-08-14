@@ -1,4 +1,5 @@
 {
+  "name": "whatsapp-em-ai-agent",
   "version": 2,
   "framework": "vite",
   "buildCommand": "pnpm run build",
